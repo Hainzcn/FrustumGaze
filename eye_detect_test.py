@@ -6,7 +6,97 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import time
 import socket
-import json
+import threading
+from collections import deque
+from scipy.interpolate import CubicSpline
+
+# Global variables for thread communication
+data_lock = threading.Lock()
+# Buffer to store (timestamp, dist, offset_x, offset_y)
+# Storing enough history for interpolation
+data_buffer = deque(maxlen=20)
+is_running = True
+
+# UDP Configuration
+UDP_IP = "127.0.0.1"
+UDP_PORT = 8888
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def udp_sender_thread():
+    """
+    Thread to send upsampled data via UDP at 60Hz using Cubic Spline Interpolation
+    """
+    global is_running
+    
+    # Target frequency 60Hz
+    interval = 1.0 / 60.0
+    # Interpolation delay (seconds) to ensure we interpolate instead of extrapolate
+    # 30fps = 33ms per frame. 100ms delay ensures we have future points.
+    delay = 0.1 
+    
+    print("UDP Sender Thread Started (60Hz)")
+    
+    while is_running:
+        start_time = time.time()
+        
+        current_data = []
+        with data_lock:
+            # Need at least a few points for cubic spline
+            if len(data_buffer) >= 4:
+                current_data = list(data_buffer)
+        
+        if len(current_data) >= 4:
+            # Extract arrays
+            times = np.array([d[0] for d in current_data])
+            dists = np.array([d[1] for d in current_data])
+            off_xs = np.array([d[2] for d in current_data])
+            off_ys = np.array([d[3] for d in current_data])
+            
+            # Target time for interpolation
+            target_time = time.time() - delay
+            
+            # Ensure target_time is within the range of our buffer (with some margin)
+            # If target_time is older than our oldest data, we can't interpolate well (lag spike?)
+            # If target_time is newer than our newest data, we are extrapolating (waiting for new frame)
+            
+            if times[0] < target_time < times[-1]:
+                try:
+                    # Create Splines
+                    # bc_type='natural' adds constraints for smoother ends
+                    cs_dist = CubicSpline(times, dists)
+                    cs_x = CubicSpline(times, off_xs)
+                    cs_y = CubicSpline(times, off_ys)
+                    
+                    # Interpolate
+                    interp_dist = float(cs_dist(target_time))
+                    interp_x = float(cs_x(target_time))
+                    interp_y = float(cs_y(target_time))
+                    
+                    # Send UDP
+                    # Format: distance,offset_x,offset_y (保留1位小数)
+                    message_str = f"{interp_dist:.1f},{interp_x:.1f},{interp_y:.1f}"
+                    sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
+                    # print(f"Sent UDP (Interp): {message_str}") # Verbose
+                    
+                except Exception as e:
+                    print(f"Interpolation Error: {e}")
+            else:
+                # Fallback: if we can't interpolate, maybe send the latest data?
+                # Or just wait. To keep 60Hz stream alive, sending latest might be better.
+                # But strict interpolation requires valid range.
+                # Let's send the nearest valid data if out of range
+                if target_time >= times[-1]:
+                    # We are waiting for new frames, use the latest
+                    latest = current_data[-1]
+                    message_str = f"{latest[1]:.1f},{latest[2]:.1f},{latest[3]:.1f}"
+                    sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
+                # If target_time < times[0], our buffer is too new? (Shouldn't happen with correct delay)
+        
+        # Maintain 60Hz loop
+        elapsed = time.time() - start_time
+        sleep_time = interval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 class OneDKalmanFilter:
     def __init__(self, Q=1e-5, R=0.01):
@@ -231,10 +321,9 @@ dist_coeffs = np.zeros((4, 1))
 LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
-# Initialize UDP Socket
-UDP_IP = "127.0.0.1"
-UDP_PORT = 8888
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# Start UDP Sender Thread
+sender_thread = threading.Thread(target=udp_sender_thread, daemon=True)
+sender_thread.start()
 
 while True:
     # 读取帧
@@ -307,14 +396,9 @@ while True:
             # 更新偏移量
             tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
 
-            # Send data via UDP
-            # Format: distance,offset_x,offset_y (保留1位小数)
-            message_str = f"{tracker.current_estimated_dist:.1f},{tracker.current_offset_x:.1f},{tracker.current_offset_y:.1f}"
-            try:
-                sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
-                print(f"Sent UDP: {message_str}")
-            except Exception as e:
-                print(f"UDP Error: {e}")
+            # Update buffer for UDP upsampling thread
+            with data_lock:
+                data_buffer.append((time.time(), tracker.current_estimated_dist, tracker.current_offset_x, tracker.current_offset_y))
     else:
         # 如果未检测到人脸，可以重置或保持最后状态
         pass
@@ -355,5 +439,6 @@ while True:
         break
 
 # 释放资源
+is_running = False
 cap.release()
 cv2.destroyAllWindows()
