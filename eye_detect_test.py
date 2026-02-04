@@ -8,7 +8,7 @@ import time
 import socket
 import threading
 from collections import deque
-from scipy.interpolate import CubicSpline
+# from scipy.interpolate import CubicSpline
 
 # Global variables for thread communication
 data_lock = threading.Lock()
@@ -31,66 +31,79 @@ def udp_sender_thread():
     # Target frequency 60Hz
     interval = 1.0 / 60.0
     # Interpolation delay (seconds) to ensure we interpolate instead of extrapolate
-    # 30fps = 33ms per frame. 100ms delay ensures we have future points.
-    delay = 0.1 
+    # Here 33.3ms at least, or it won't work
+    delay = 0.04
     
-    print("UDP Sender Thread Started (60Hz)")
+    print("UDP Sender Thread Started (60Hz - Linear Interpolation)")
     
     while is_running:
         start_time = time.time()
         
         current_data = []
         with data_lock:
-            # Need at least a few points for cubic spline
-            if len(data_buffer) >= 4:
+            # Need at least 2 points for linear interpolation
+            if len(data_buffer) >= 2:
                 current_data = list(data_buffer)
         
-        if len(current_data) >= 4:
-            # Extract arrays
-            times = np.array([d[0] for d in current_data])
-            dists = np.array([d[1] for d in current_data])
-            off_xs = np.array([d[2] for d in current_data])
-            off_ys = np.array([d[3] for d in current_data])
-            
+        if len(current_data) >= 2:
             # Target time for interpolation
             target_time = time.time() - delay
             
-            # Ensure target_time is within the range of our buffer (with some margin)
-            # If target_time is older than our oldest data, we can't interpolate well (lag spike?)
-            # If target_time is newer than our newest data, we are extrapolating (waiting for new frame)
+            # Find the two points bounding the target_time
+            # data_buffer is ordered by time (oldest first)
+            p1 = None
+            p2 = None
             
-            if times[0] < target_time < times[-1]:
-                try:
-                    # Create Splines
-                    # bc_type='natural' adds constraints for smoother ends
-                    cs_dist = CubicSpline(times, dists)
-                    cs_x = CubicSpline(times, off_xs)
-                    cs_y = CubicSpline(times, off_ys)
-                    
-                    # Interpolate
-                    interp_dist = float(cs_dist(target_time))
-                    interp_x = float(cs_x(target_time))
-                    interp_y = float(cs_y(target_time))
-                    
-                    # Send UDP
-                    # Format: distance,offset_x,offset_y (保留1位小数)
-                    message_str = f"{interp_dist:.1f},{interp_x:.1f},{interp_y:.1f}"
-                    sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
-                    # print(f"Sent UDP (Interp): {message_str}") # Verbose
-                    
-                except Exception as e:
-                    print(f"Interpolation Error: {e}")
+            # Search for the interval [p1, p2] that contains target_time
+            # Since current_data is sorted by time, we can iterate
+            for i in range(len(current_data) - 1):
+                if current_data[i][0] <= target_time <= current_data[i+1][0]:
+                    p1 = current_data[i]
+                    p2 = current_data[i+1]
+                    break
+            
+            val_dist = 0
+            val_x = 0
+            val_y = 0
+            
+            found_interval = False
+            if p1 is not None and p2 is not None:
+                found_interval = True
+                # Linear Interpolation (Lerp)
+                t1, d1, x1, y1 = p1
+                t2, d2, x2, y2 = p2
+                
+                # Calculate ratio (0.0 to 1.0)
+                if t2 - t1 > 0.0001: # Avoid division by zero
+                    ratio = (target_time - t1) / (t2 - t1)
+                else:
+                    ratio = 0
+                
+                val_dist = d1 + (d2 - d1) * ratio
+                val_x = x1 + (x2 - x1) * ratio
+                val_y = y1 + (y2 - y1) * ratio
             else:
-                # Fallback: if we can't interpolate, maybe send the latest data?
-                # Or just wait. To keep 60Hz stream alive, sending latest might be better.
-                # But strict interpolation requires valid range.
-                # Let's send the nearest valid data if out of range
-                if target_time >= times[-1]:
-                    # We are waiting for new frames, use the latest
-                    latest = current_data[-1]
-                    message_str = f"{latest[1]:.1f},{latest[2]:.1f},{latest[3]:.1f}"
-                    sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
-                # If target_time < times[0], our buffer is too new? (Shouldn't happen with correct delay)
+                # Fallback if out of range
+                if target_time < current_data[0][0]:
+                     # Too old? Use oldest
+                    _, val_dist, val_x, val_y = current_data[0]
+                elif target_time > current_data[-1][0]:
+                    # Too new? Use newest
+                    _, val_dist, val_x, val_y = current_data[-1]
+                else:
+                    # Should be covered by loop, but just in case
+                     _, val_dist, val_x, val_y = current_data[-1]
+
+            try:
+                # Send UDP
+                # Format: distance,offset_x,offset_y (保留1位小数)
+                message_str = f"{val_dist:.1f},{val_x:.1f},{val_y:.1f}"
+                sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
+                # if found_interval:
+                #    print(f"Sent UDP (Lerp): {message_str}")
+                
+            except Exception as e:
+                print(f"UDP Error: {e}")
         
         # Maintain 60Hz loop
         elapsed = time.time() - start_time
