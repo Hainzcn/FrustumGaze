@@ -5,6 +5,8 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import time
+import socket
+import json
 
 class OneDKalmanFilter:
     def __init__(self, Q=1e-5, R=0.01):
@@ -56,7 +58,7 @@ class EyeTracker:
         filtered_pixel = self.pixel_dist_filter.update(pixel_dist)
         filtered_estimated = self.real_dist_filter.update(estimated_dist)
         
-        return int(round(filtered_pixel)), int(round(filtered_estimated))
+        return filtered_pixel, filtered_estimated
 
     def update_offset(self, eye_points, frame_width, frame_height, pixel_dist, real_dist_cm):
         """
@@ -115,12 +117,48 @@ class EyeTracker:
         filtered_x = self.offset_x_filter.update(real_offset_x)
         filtered_y = self.offset_y_filter.update(real_offset_y)
         
-        # 输出整数 (四舍五入)
-        self.current_offset_x = int(round(filtered_x))
-        self.current_offset_y = int(round(filtered_y))
+        # 保留浮点数精度
+        self.current_offset_x = filtered_x
+        self.current_offset_y = filtered_y
+
+# 计算头部姿态（Yaw角）用于距离校正
+def get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs):
+    # 2D 图像点 (使用 MediaPipe 关键点索引)
+    # Nose tip: 1, Chin: 152, Left Eye Left Corner: 33, Right Eye Right Corner: 263, Left Mouth Corner: 61, Right Mouth Corner: 291
+    image_points = np.array([
+        (face_landmarks[1].x * w, face_landmarks[1].y * h),     # Nose tip
+        (face_landmarks[152].x * w, face_landmarks[152].y * h), # Chin
+        (face_landmarks[33].x * w, face_landmarks[33].y * h),   # Left eye left corner
+        (face_landmarks[263].x * w, face_landmarks[263].y * h), # Right eye right corner
+        (face_landmarks[61].x * w, face_landmarks[61].y * h),   # Left Mouth corner
+        (face_landmarks[291].x * w, face_landmarks[291].y * h)  # Right mouth corner
+    ], dtype="double")
+
+    # 3D 模型点 (通用人脸模型)
+    model_points = np.array([
+        (0.0, 0.0, 0.0),             # Nose tip
+        (0.0, -330.0, -65.0),        # Chin
+        (-225.0, 170.0, -135.0),     # Left eye left corner
+        (225.0, 170.0, -135.0),      # Right eye right corner
+        (-150.0, -150.0, -125.0),    # Left Mouth corner
+        (150.0, -150.0, -125.0)      # Right mouth corner
+    ], dtype="double")
+
+    # PnP 求解
+    (success, rotation_vector, translation_vector) = cv2.solvePnP(model_points, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
+
+    if not success:
+        return 0, 0, 0
+
+    # 计算欧拉角
+    rmat, jac = cv2.Rodrigues(rotation_vector)
+    angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
+    
+    # angles[0]=pitch, angles[1]=yaw, angles[2]=roll
+    return angles[0], angles[1], angles[2]
 
 # 计算瞳孔间距和距离估算
-def calculate_distance(eye_points, frame_width, frame_height, fov=60):
+def calculate_distance(eye_points, frame_width, frame_height, fov=55):
     if len(eye_points) < 2:
         return 0, 0
     
@@ -129,7 +167,7 @@ def calculate_distance(eye_points, frame_width, frame_height, fov=60):
     pixel_distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
     
     # 已知平均瞳距6.5cm
-    real_pupil_distance = 6.5  # cm
+    real_pupil_distance = 7  # cm
     
     # 计算摄像头的焦距（基于视角和图像宽度）
     fov_rad = math.radians(fov)
@@ -176,9 +214,27 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap.set(cv2.CAP_PROP_FPS, 30)
 
+# Camera Matrix for PnP
+frame_w = 640
+frame_h = 480
+fov = 60.0
+fov_rad = math.radians(fov)
+focal_length = (frame_w / 2) / math.tan(fov_rad / 2)
+cam_matrix = np.array([
+    [focal_length, 0, frame_w / 2],
+    [0, focal_length, frame_h / 2],
+    [0, 0, 1]
+], dtype="double")
+dist_coeffs = np.zeros((4, 1))
+
 # MediaPipe Iris Indices
 LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
+
+# Initialize UDP Socket
+UDP_IP = "127.0.0.1"
+UDP_PORT = 8888
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 while True:
     # 读取帧
@@ -230,13 +286,35 @@ while True:
             # 计算距离和偏移
             pixel_dist, estimated_dist = calculate_distance(eye_points, w, h)
             
+            # 计算头部姿态并校正距离
+            pitch, yaw, roll = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
+            
+            # 三角变换校正: 
+            # 投影瞳距 = 真实瞳距 * cos(Yaw)
+            # 估算距离 = (焦距 * 真实瞳距) / 投影瞳距 = (焦距 * 真实瞳距) / (真实瞳距像素 * cos(Yaw))
+            #          = (正面估算距离) / cos(Yaw)
+            # 因此: 正面估算距离 = 当前估算距离 * cos(Yaw)
+            correction_factor = math.cos(math.radians(yaw))
+            if correction_factor < 0.2: correction_factor = 0.2 # 防止极端角度导致数值异常
+            
+            corrected_dist = estimated_dist * correction_factor
+            
             # 应用滤波
-            filtered_pixel, filtered_estimated = tracker.apply_distance_filter(pixel_dist, estimated_dist)
+            filtered_pixel, filtered_estimated = tracker.apply_distance_filter(pixel_dist, corrected_dist)
             tracker.current_pixel_dist = filtered_pixel
             tracker.current_estimated_dist = filtered_estimated
             
             # 更新偏移量
             tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
+
+            # Send data via UDP
+            # Format: distance,offset_x,offset_y (保留1位小数)
+            message_str = f"{tracker.current_estimated_dist:.1f},{tracker.current_offset_x:.1f},{tracker.current_offset_y:.1f}"
+            try:
+                sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
+                print(f"Sent UDP: {message_str}")
+            except Exception as e:
+                print(f"UDP Error: {e}")
     else:
         # 如果未检测到人脸，可以重置或保持最后状态
         pass
@@ -260,8 +338,8 @@ while True:
             info_text = "too far!"
             cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         else:
-            info_text = f"Dist: {tracker.current_estimated_dist}cm | PD: {tracker.current_pixel_dist}px"
-            offset_text = f"Offset X: {tracker.current_offset_x:+d}cm | Y: {tracker.current_offset_y:+d}cm"
+            info_text = f"Dist: {int(tracker.current_estimated_dist)}cm | PD: {int(tracker.current_pixel_dist)}px"
+            offset_text = f"Offset X: {int(tracker.current_offset_x):+d}cm | Y: {int(tracker.current_offset_y):+d}cm"
             cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             cv2.putText(frame, offset_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
