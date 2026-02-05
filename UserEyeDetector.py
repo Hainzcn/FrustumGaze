@@ -85,14 +85,14 @@ def udp_sender_thread():
             else:
                 # Fallback if out of range
                 if target_time < current_data[0][0]:
-                     # Too old? Use oldest
+                    # Too old? Use oldest
                     _, val_dist, val_x, val_y = current_data[0]
                 elif target_time > current_data[-1][0]:
                     # Too new? Use newest
                     _, val_dist, val_x, val_y = current_data[-1]
                 else:
                     # Should be covered by loop, but just in case
-                     _, val_dist, val_x, val_y = current_data[-1]
+                    _, val_dist, val_x, val_y = current_data[-1]
 
             try:
                 # Send UDP
@@ -315,6 +315,140 @@ class EyeTracker:
         self.current_offset_x = filtered_x
         self.current_offset_y = filtered_y
 
+class ImagePreprocessor:
+    def __init__(self):
+        self.last_roi = None # (x, y, w, h)
+        self.alpha = 0.7 # ROI smoothing factor (0-1)
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+
+    def process(self, frame, last_landmarks=None):
+        """
+        Preprocessing: ROI Crop -> Upscale -> Bilateral Filter -> Contrast Enhancement
+        Returns: processed_frame, roi_info (x, y, w, h, scale)
+        """
+        h_frame, w_frame = frame.shape[:2]
+        
+        # 1. Compute ROI
+        roi = self._compute_roi(w_frame, h_frame, last_landmarks)
+        x, y, w, h = roi
+        
+        # Crop
+        if w <= 0 or h <= 0:
+            return frame, (0, 0, w_frame, h_frame, 1.0)
+            
+        crop = frame[y:y+h, x:x+w]
+        
+        if crop.size == 0:
+            return frame, (0, 0, w_frame, h_frame, 1.0)
+
+        # 2. Pixel Alignment / Cubic Interpolation Upscaling
+        scale_factor = 1.0
+        target_min_size = 256
+        min_dim = min(w, h)
+        
+        if min_dim < target_min_size:
+            scale_factor = target_min_size / min_dim
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        
+        # 3. Bilateral Filter (Edge-preserving smoothing)
+        crop = cv2.bilateralFilter(crop, d=5, sigmaColor=75, sigmaSpace=75)
+        
+        # 4. Contrast Enhancement (CLAHE on L channel)
+        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l2 = self.clahe.apply(l)
+        lab = cv2.merge((l2, a, b))
+        crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
+        return crop, (x, y, w, h, scale_factor)
+
+    def _compute_roi(self, w_frame, h_frame, landmarks):
+        if landmarks is None:
+            # Lost target or initial state: Smoothly reset to full frame
+            target_roi = (0, 0, w_frame, h_frame)
+        else:
+            # Compute bounding box
+            xs = [p.x for p in landmarks]
+            ys = [p.y for p in landmarks]
+            
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            
+            # Convert to pixel coordinates (center and dimensions)
+            cx = (min_x + max_x) / 2 * w_frame
+            cy = (min_y + max_y) / 2 * h_frame
+            fw = (max_x - min_x) * w_frame
+            fh = (max_y - min_y) * h_frame
+            
+            # Expand range (Padding)
+            padding = 2.0 
+            size = max(fw, fh) * padding
+            
+            # Calculate top-left
+            x = int(cx - size / 2)
+            y = int(cy - size / 2)
+            w = int(size)
+            h = int(size)
+            
+            # Boundary checks
+            x = max(0, x)
+            y = max(0, y)
+            w = min(w, w_frame - x)
+            h = min(h, h_frame - y)
+            
+            target_roi = (x, y, w, h)
+
+        # Smooth ROI changes
+        if self.last_roi is None:
+            self.last_roi = target_roi
+            return target_roi
+        
+        lx, ly, lw, lh = self.last_roi
+        tx, ty, tw, th = target_roi
+        
+        # Faster reset if target lost
+        alpha = self.alpha if landmarks is not None else 0.5
+        
+        nx = int(lx * alpha + tx * (1 - alpha))
+        ny = int(ly * alpha + ty * (1 - alpha))
+        nw = int(lw * alpha + tw * (1 - alpha))
+        nh = int(lh * alpha + th * (1 - alpha))
+        
+        # Boundary safety check
+        nx = max(0, nx)
+        ny = max(0, ny)
+        nw = min(nw, w_frame - nx)
+        nh = min(nh, h_frame - ny)
+        
+        self.last_roi = (nx, ny, nw, nh)
+        return self.last_roi
+
+    def restore_landmarks(self, detection_result, roi_info, w_frame, h_frame):
+        """Restore normalized local coordinates to normalized global coordinates"""
+        if not detection_result.face_landmarks:
+            return
+
+        roi_x, roi_y, roi_w, roi_h, scale = roi_info
+        
+        # If full frame and no scale, no processing needed
+        if roi_x == 0 and roi_y == 0 and roi_w == w_frame and roi_h == h_frame and scale == 1.0:
+            return
+
+        for face_landmarks in detection_result.face_landmarks:
+            for p in face_landmarks:
+                # Convert back to global normalized coordinates
+                # p.x is normalized in the cropped image
+                # roi_w is the width of the crop in the original image
+                # roi_x is the x offset in the original image
+                
+                new_x = (p.x * roi_w + roi_x) / w_frame
+                new_y = (p.y * roi_h + roi_y) / h_frame
+                
+                p.x = new_x
+                p.y = new_y
+
 # 计算头部姿态（Yaw角）用于距离校正
 def get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs):
     # 2D 图像点 (使用 MediaPipe 关键点索引)
@@ -389,6 +523,8 @@ def calculate_distance(eye_points, frame_width, frame_height, fov=55):
 
 # 初始化跟踪器
 tracker = EyeTracker()
+preprocessor = ImagePreprocessor()
+last_landmarks_norm = None
 
 # Initialize MediaPipe Face Landmarker
 base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
@@ -455,12 +591,31 @@ while True:
     # frame = cv2.flip(frame, 1)
     
     h, w = frame.shape[:2]
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # 预处理：ROI -> 放大 -> 滤波 -> 增强
+    processed_frame, roi_info = preprocessor.process(frame, last_landmarks_norm)
+    
+    # 转换处理后的帧为 RGB
+    processed_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
     
     # MediaPipe 处理
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
     timestamp_ms = int(time.time() * 1000)
     detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+    
+    # 坐标还原 (Local Normalized -> Global Normalized)
+    preprocessor.restore_landmarks(detection_result, roi_info, w, h)
+    
+    # 更新上一帧 Landmarks (用于下一帧 ROI 计算)
+    if detection_result.face_landmarks:
+        last_landmarks_norm = detection_result.face_landmarks[0]
+    else:
+        last_landmarks_norm = None
+        
+    # 可视化 ROI (蓝色矩形)
+    rx, ry, rw, rh, _ = roi_info
+    if rw < w or rh < h:
+        cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
     
     eye_points = []
     
