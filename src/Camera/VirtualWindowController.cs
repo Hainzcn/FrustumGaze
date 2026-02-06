@@ -13,7 +13,7 @@ public class VirtualWindowController : MonoBehaviour
     [Header("Coordinate Mapping")]
     public Vector3 cameraOffsetFromScreenCenter = new Vector3(0, 0.15f, 0);
     public float sensitivity = 1.0f;
-    public float unitScale = 0.01f; // 厘米转米 (如果UDP数据单位是厘米)
+    // public float unitScale = 0.01f; // 已移至 DataManager 统一管理
 
     [Header("Movement Smoothing")]
     [Tooltip("是否启用平滑移动")]
@@ -23,28 +23,50 @@ public class VirtualWindowController : MonoBehaviour
 
     // 显式标注命名空间，消除二义性
     private UnityEngine.Camera _cam;
+    private Vector3 _virtualScreenCenter;
     
     void Start()
     {
         _cam = GetComponent<UnityEngine.Camera>();
+
+        // 初始化虚拟屏幕中心
+        // 假设在 Start 时，Camera 处于“默认观察位置”
+        // 我们根据默认的 eyePos 反推屏幕中心在世界坐标系的位置
+        // 这样可以保留用户在 Editor 中设置的 Camera 位置，防止运行时乱飞
+        
+        // 注意：DataManager.Instance 可能在 Start 时尚未准备好，或者我们想要一个硬编码的默认值
+        // 这里使用默认的 60cm (0.6m) 作为初始距离假设。
+        Vector3 defaultEyePos = new Vector3(0, 0, -0.6f); 
+        Vector3 localEyePos = defaultEyePos + cameraOffsetFromScreenCenter;
+        _virtualScreenCenter = transform.position - localEyePos;
+        
+        Debug.Log($"[VirtualWindow] Initialized. Screen Center inferred at: {_virtualScreenCenter}");
     }
 
     // 每帧更新投影
     void LateUpdate()
     {
-        Vector3 eyePos = new Vector3(0, 0, -0.6f); // 默认值
-
-        // 改为从 DataManager 获取数据
+        // 1. 获取眼球相对于屏幕的局部坐标 (Local Eye Position)
+        // 默认值 (单位：米)
+        Vector3 rawEyeData = new Vector3(0, 0, -0.6f);
+        
+        // 从 DataManager 获取数据
         if (EyeTrackingDataManager.Instance != null)
         {
             Vector3 data = EyeTrackingDataManager.Instance.LatestData;
-            // 假设 DataManager 返回的是 (x, y, d) 格式，通常单位为厘米
-            // 映射为: (x, y, d) * unitScale
-            // 依据用户反馈保持当前映射逻辑
-            eyePos = new Vector3(data.x, data.y, data.z) * unitScale;
+            // 只有当接收到有效数据时(Z!=0)才覆盖默认值
+            // 注意：data 已经被 DataManager 缩放过，单位应该是米
+            if (Mathf.Abs(data.z) > 0.001f)
+            {
+                // 如果发现实际运行时 Z 轴反向，请尝试改为 -data.z
+                rawEyeData = new Vector3(data.x, data.y, data.z);
+            }
         }
+        
+        // 应用单位缩放 (已在 DataManager 处理，这里不再缩放)
+        Vector3 eyePosRelative = rawEyeData;
 
-        Vector3 targetPos = eyePos + cameraOffsetFromScreenCenter;
+        Vector3 targetPos = eyePosRelative + cameraOffsetFromScreenCenter;
         
         // 更新相机位置
         if (enableSmoothing)

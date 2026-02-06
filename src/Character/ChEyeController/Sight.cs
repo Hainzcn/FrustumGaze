@@ -18,8 +18,8 @@ public class EyeGazeFocus : MonoBehaviour
     [Header("数据源设置")]
     [Tooltip("是否启用眼动数据驱动")]
     public bool useEyeData = true;
-    [Tooltip("输入数据的单位缩放")]
-    public float dataScale = 1.0f;
+    // [Tooltip("输入数据的单位缩放")]
+    // public float dataScale = 1.0f; // 已移至 DataManager 统一管理
 
     [Header("限制参数")]
     [Tooltip("最大旋转角度")]
@@ -107,7 +107,8 @@ public class EyeGazeFocus : MonoBehaviour
             Vector3 rawData = EyeTrackingDataManager.Instance.LatestData;
             
             // 计算距离 (假设z是深度)
-            float d = rawData.magnitude * dataScale;
+            // 注意：DataManager 中已经应用了缩放 (inputScale)，这里直接使用 magnitude 即可
+            float d = rawData.magnitude;
             if (d < 0.1f) d = 1.0f;
 
             // 保持原逻辑：人物看向Camera后方d距离的点

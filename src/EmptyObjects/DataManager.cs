@@ -20,9 +20,11 @@ public class EyeTrackingDataManager : MonoBehaviour
     [Header("UDP Settings")]
     public int port = 8888;
     public bool runInBackground = true;
+    [Tooltip("全局数据缩放 (例如从厘米转米: 0.01)")]
+    public float inputScale = 0.01f;
 
     [Header("Runtime Data (Read Only)")]
-    [SerializeField] private Vector3 _latestData; // x, y, z
+    [SerializeField] private Vector3 _latestData; // x, y, z (已缩放)
     
     // 公共访问属性 (线程安全读取)
     public Vector3 LatestData
@@ -163,9 +165,10 @@ public class EyeTrackingDataManager : MonoBehaviour
             string sX = text.Substring(firstComma + 1, secondComma - firstComma - 1);
             string sY = text.Substring(secondComma + 1);
 
-            float x = -float.Parse(sX);
-            float y = -float.Parse(sY);
-            float z = float.Parse(sZ);
+            // 使用 InvariantCulture 防止不同地区系统(如使用逗号小数点的地区)解析错误
+            float x = -float.Parse(sX, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
+            float y = -float.Parse(sY, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
+            float z = -float.Parse(sZ, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
 
             // 写入数据
             // 由于 Vector3 赋值不是原子的，这里使用 lock 确保数据一致性
