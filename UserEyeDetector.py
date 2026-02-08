@@ -570,7 +570,7 @@ class ConfigManager:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     # --- 摄像头数据管理 ---
-    def update_camera(self, device_index, fov=None, name=None, user_configured=False):
+    def update_camera(self, device_index, fov=None, name=None, user_configured=False, resolution=None):
         idx_str = str(device_index)
         if idx_str not in self.cameras_data:
             self.cameras_data[idx_str] = {
@@ -585,6 +585,8 @@ class ConfigManager:
             self.cameras_data[idx_str]["name"] = name
         if user_configured:
             self.cameras_data[idx_str]["user_configured"] = True
+        if resolution is not None:
+            self.cameras_data[idx_str]["resolution"] = resolution
             
         self._save_json(self.cameras_config_path, self.cameras_data)
 
@@ -698,6 +700,79 @@ def select_camera_device():
                 print("FOV必须在0到180之间。")
         except ValueError:
             print("输入格式错误，请输入数字。")
+    
+    return selected_index, fov_val
+
+def select_resolution(cap, camera_index, config_manager):
+    # 1. 检查是否有保存的分辨率配置
+    saved_info = config_manager.get_camera_info(camera_index)
+    if saved_info and "resolution" in saved_info:
+        res = saved_info["resolution"]
+        print(f"检测到已保存的分辨率配置: {res[0]}x{res[1]}")
+        return res[0], res[1]
+
+    # 2. 如果没有保存配置，扫描支持的分辨率
+    print("正在扫描摄像头支持的分辨率...")
+    target_resolutions = [
+        (1920, 1080), # 1080p
+        (1280, 720),  # 720p
+        (800, 600),   # SVGA
+        (640, 480)    # VGA
+    ]
+    
+    available_resolutions = []
+    
+    # 保存当前的设置以便恢复（可选，这里主要是为了测试）
+    current_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    current_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
+    for w, h in target_resolutions:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        
+        aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # 只有当实际分辨率与请求的一致时才认为是完美支持
+        if aw == w and ah == h:
+            available_resolutions.append((w, h))
+        else:
+            # 如果不完全匹配，但之前没有添加过这个实际分辨率，也可以添加
+            # 但为了用户体验，只列出精准匹配的，除非一个都匹配不上
+            pass
+            
+    # 如果没有扫描到精准匹配的，就回退到默认
+    if not available_resolutions:
+        print("未能检测到标准分辨率，将使用默认分辨率。")
+        return int(current_w), int(current_h)
+        
+    print("请选择要使用的分辨率：")
+    for i, (w, h) in enumerate(available_resolutions):
+        print(f" {i}: {w}x{h}")
+        
+    selected_res = None
+    while True:
+        try:
+            choice = input(f"请输入分辨率编号 [0-{len(available_resolutions)-1}]: ").strip()
+            if not choice:
+                 # 默认选第一个（通常是最高的）
+                 selected_res = available_resolutions[0]
+                 break
+            
+            idx = int(choice)
+            if 0 <= idx < len(available_resolutions):
+                selected_res = available_resolutions[idx]
+                break
+            else:
+                print("无效的编号。")
+        except ValueError:
+            print("请输入数字。")
+            
+    # 保存选择
+    print(f"已选择分辨率: {selected_res[0]}x{selected_res[1]}，并保存到配置。")
+    config_manager.update_camera(camera_index, resolution=selected_res)
+    
+    return selected_res[0], selected_res[1]
 
 camera_index, camera_fov = select_camera_device()
 if camera_index is None:
@@ -716,40 +791,12 @@ if not cap or not cap.isOpened():
     exit()
 
 # 设置摄像头参数
-# 优先尝试获取摄像头支持的最高规格视频流（从1080p开始尝试）
-target_resolutions = [
-    (3840, 2160), # 4K
-    (2560, 1440), # 2K
-    (1920, 1080), # 1080p
-]
+# 使用用户选择或保存的分辨率
+target_w, target_h = select_resolution(cap, camera_index, config_manager)
 
-print("正在尝试设置高分辨率...")
-current_w = 0
-current_h = 0
-
-# 1. 首先尝试设置列表中的高分辨率
-for w, h in target_resolutions:
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-    
-    # 检查实际生效的分辨率
-    aw = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    ah = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    
-    if int(aw) == w and int(ah) == h:
-        print(f"成功设置分辨率: {w}x{h}")
-        current_w = aw
-        current_h = ah
-        break
-    else:
-        # 如果设置失败，记录当前实际值，继续尝试下一个
-        # 注意：有些驱动在设置不支持的高分辨率时，会回退到它支持的最大分辨率
-        # 所以如果实际值已经很高（比如我们设4K它给了1080p），也可以接受
-        if aw >= 1920 and ah >= 1080:
-            print(f"请求 {w}x{h} -> 实际获得 {int(aw)}x{int(ah)} (已满足高规格要求)")
-            current_w = aw
-            current_h = ah
-            break
+print(f"正在设置分辨率: {target_w}x{target_h}")
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
 
 cap.set(cv2.CAP_PROP_FPS, 30)
 
@@ -757,6 +804,10 @@ cap.set(cv2.CAP_PROP_FPS, 30)
 actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
 actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
+
+# 如果设置失败，给出警告
+if int(actual_w) != target_w or int(actual_h) != target_h:
+    print(f"警告: 实际分辨率 ({int(actual_w)}x{int(actual_h)}) 与请求分辨率 ({target_w}x{target_h}) 不一致。")
 
 # Camera Matrix for PnP
 frame_w = int(actual_w)
@@ -779,12 +830,25 @@ RIGHT_IRIS = [473, 474, 475, 476, 477]
 sender_thread = threading.Thread(target=udp_sender_thread, daemon=True)
 sender_thread.start()
 
+# FPS 计算相关
+prev_frame_time = 0
+new_frame_time = 0
+
 while True:
     # 读取帧
     ret, frame = cap.read()
     if not ret:
         print("Error: Could not read frame")
         break
+    
+    # 计算 FPS
+    new_frame_time = time.time()
+    fps = 0
+    if prev_frame_time > 0:
+        delta = new_frame_time - prev_frame_time
+        if delta > 0:
+            fps = 1.0 / delta
+    prev_frame_time = new_frame_time
     
     # print("Frame read successfully") # Debug
 
@@ -884,6 +948,9 @@ while True:
     center_x, center_y = w // 2, h // 2
     cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
     cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
+
+    # 绘制 FPS (左上角第一行)
+    cv2.putText(frame, f"FPS: {int(fps)}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     # 绘制主视眼标记（黄色圆圈 + 'R'）
     if tracker.dominant_eye_pos is not None and detection_result.face_landmarks:
@@ -895,12 +962,12 @@ while True:
     if tracker.current_pixel_dist > 0:
         if tracker.current_estimated_dist > 200:
             info_text = "too far!"
-            cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         else:
             info_text = f"Dist: {int(tracker.current_estimated_dist)}cm | PD: {int(tracker.current_pixel_dist)}px"
             offset_text = f"Offset X: {int(tracker.current_offset_x):+d}cm | Y: {int(tracker.current_offset_y):+d}cm"
-            cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(frame, offset_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(frame, offset_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             # 绘制瞳孔间距线 (使用滤波后的点)
             if len(eye_points) >= 2:
