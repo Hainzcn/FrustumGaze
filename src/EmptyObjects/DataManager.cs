@@ -25,7 +25,7 @@ public class EyeTrackingDataManager : MonoBehaviour
 
     [Header("Runtime Data (Read Only)")]
     [SerializeField] private Vector3 _latestData; // x, y, z (已缩放)
-    
+
     // 公共访问属性 (线程安全读取)
     public Vector3 LatestData
     {
@@ -77,15 +77,15 @@ public class EyeTrackingDataManager : MonoBehaviour
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _socket.Bind(new IPEndPoint(IPAddress.Any, port));
             // 设置接收超时，避免线程死锁无法退出
-            _socket.ReceiveTimeout = 1000; 
+            _socket.ReceiveTimeout = 1000;
 
             _remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
-            
+
             _isRunning = true;
             _receiveThread = new Thread(ReceiveLoop);
             _receiveThread.IsBackground = true;
             _receiveThread.Start();
-            
+
             Debug.Log($"[EyeTrackingDataManager] UDP Receiver started on port {port}");
         }
         catch (Exception e)
@@ -100,12 +100,12 @@ public class EyeTrackingDataManager : MonoBehaviour
         if (_receiveThread != null && _receiveThread.IsAlive)
         {
             // 等待线程结束，或者直接通过关闭 Socket 强制中断
-            try 
+            try
             {
-                if (_socket != null) _socket.Close(); 
+                if (_socket != null) _socket.Close();
             }
-            catch {}
-            
+            catch { }
+
             // _receiveThread.Join(500); // 可选：等待线程优雅退出
         }
         _socket = null;
@@ -131,7 +131,7 @@ public class EyeTrackingDataManager : MonoBehaviour
                     // 假设格式为 "x,y,z" 或 "x,y,d" 的 UTF-8 字符串
                     // 为了性能，这里还是需要将 byte 转 string，但只转实际长度
                     string text = Encoding.UTF8.GetString(_receiveBuffer, 0, length);
-                    
+
                     ParseAndSetData(text);
                 }
             }
@@ -153,10 +153,10 @@ public class EyeTrackingDataManager : MonoBehaviour
             // 简单的逗号分割解析
             // 优化提示：如果追求极致 0 GC，可以手动遍历 byte[] 解析 float，跳过 string 转换
             // 但考虑到每帧一次 string alloc 在现代 Unity (SGen/Incremental GC) 中通常可接受
-            
+
             int firstComma = text.IndexOf(',');
             if (firstComma == -1) return;
-            
+
             int secondComma = text.IndexOf(',', firstComma + 1);
             if (secondComma == -1) return;
 
