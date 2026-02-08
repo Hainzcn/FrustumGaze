@@ -681,9 +681,9 @@ class FrameProcessorThread:
                 
                 # 将结果放入输出队列
                 if self.output_queue.full():
-                     try:
+                    try:
                         self.output_queue.get_nowait()
-                     except queue.Empty:
+                    except queue.Empty:
                         pass
                 
                 self.output_queue.put({
