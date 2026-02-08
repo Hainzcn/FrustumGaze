@@ -7,66 +7,38 @@ from mediapipe.tasks.python import vision
 import time
 import socket
 import threading
+import queue
 # from scipy.interpolate import CubicSpline
 
 # 全局变量用于线程间通信
+VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计算和 UDP 发送
 latest_data = None
 data_lock = threading.Lock()
 stop_event = threading.Event()
-current_udp_rate = 0  # 用于存储 UDP 发送频率
 
-def udp_sender_thread(ip, port):
-    global latest_data, current_udp_rate
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # 目标发送频率
-    target_fps = 60.0
-    interval = 1.0 / target_fps
-    
-    last_send_time = time.time()
-    
-    # 频率统计相关
-    send_count = 0
-    last_rate_update_time = time.time()
-    
-    print(f"UDP 发送线程已启动，目标地址: {ip}:{port}")
-    
-    while not stop_event.is_set():
-        current_time = time.time()
+# UDP socket (initialized in main)
+sock = None
+
+# --- Camera Model ---
+class CameraModel:
+    def __init__(self, frame_w, frame_h, fov_deg=60.0):
+        self.frame_w = frame_w
+        self.frame_h = frame_h
+        self.fov = fov_deg
         
-        # 频率统计更新 (每秒更新一次)
-        if current_time - last_rate_update_time >= 1.0:
-            current_udp_rate = send_count / (current_time - last_rate_update_time)
-            send_count = 0
-            last_rate_update_time = current_time
-
-        if current_time - last_send_time >= interval:
-            data_to_send = None
-            with data_lock:
-                if latest_data:
-                    data_to_send = latest_data.copy()
-            
-            if data_to_send:
-                try:
-                    # JSON 序列化
-                    json_data = json.dumps(data_to_send)
-                    # 发送数据
-                    sock.sendto(json_data.encode('utf-8'), (ip, port))
-                    send_count += 1
-                except Exception as e:
-                    print(f"UDP 发送错误: {e}")
-            
-            # 更新最后发送时间，保持稳定的发送频率
-            # 使用简单的累加方式可能会导致漂移，这里直接用当前时间
-            # 为了更精确的 60Hz，可以考虑 sleep
-            last_send_time = current_time
+        # Calculate intrinsics once
+        self.fov_rad = math.radians(self.fov)
+        # Assuming square pixels and principal point at center
+        self.focal_length = (self.frame_w / 2) / math.tan(self.fov_rad / 2)
+        self.cx = self.frame_w / 2.0
+        self.cy = self.frame_h / 2.0
         
-        # 短暂休眠以避免占用过多 CPU，同时保持响应速度
-        # 60Hz 意味着每 16ms 发送一次，休眠 1-2ms 是安全的
-        time.sleep(0.002)
-
-    sock.close()
-    print("UDP 发送线程已停止")
+        self.cam_matrix = np.array([
+            [self.focal_length, 0, self.cx],
+            [0, self.focal_length, self.cy],
+            [0, 0, 1]
+        ], dtype="double")
+        self.dist_coeffs = np.zeros((4, 1))
 
 # --- 1€ Filter Implementation for Stability & Responsiveness ---
 class OneEuroFilter:
@@ -307,10 +279,10 @@ class ImagePreprocessor:
             scale_factor = target_min_size / min_dim
             new_w = int(w * scale_factor)
             new_h = int(h * scale_factor)
-            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
         # 3. Bilateral Filter (Edge-preserving smoothing)
-        crop = cv2.bilateralFilter(crop, d=5, sigmaColor=75, sigmaSpace=75)
+        # crop = cv2.bilateralFilter(crop, d=5, sigmaColor=75, sigmaSpace=75)
         
         # 4. Contrast Enhancement (CLAHE on L channel)
         lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
@@ -442,7 +414,7 @@ def get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs):
     ], dtype="double")
 
     # PnP 求解
-    (success, rotation_vector, translation_vector) = cv2.solvePnP(model_points, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
+    (success, rotation_vector, translation_vector) = cv2.solvePnP(model_points, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_EPNP)
 
     if not success:
         return 0, 0, 0
@@ -559,9 +531,9 @@ class ConfigManager:
     def get_last_camera(self):
         return self.user_prefs.get('last_camera_index')
 
-# --- 视频流获取优化 ---
+# --- 视频流获取优化 (Producer) ---
 class WebcamVideoStream:
-    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY):
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2):
         self.src = src
         self.width = width
         self.height = height
@@ -571,45 +543,23 @@ class WebcamVideoStream:
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
         
         # 优化配置
-        # 1. 强制 MJPEG 压缩 (如果摄像头支持)
-        # 这通常能显著提高高分辨率下的帧率 (减少USB带宽占用)
+        # 1. 强制 MJPEG 压缩
         self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        
         # 2. 设置分辨率
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        
-        # 3. 设置 FPS (尝试请求30，实际取决于光照和带宽)
+        # 3. 设置 FPS
         self.stream.set(cv2.CAP_PROP_FPS, 30)
-        
         # 4. 减少 OpenCV 内部缓冲区
-        # 设置为1确保我们总是获取最新的帧，减少延迟
         self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         # 5. 关闭自动曝光、白平衡、增益
-        # 注意：这些设置高度依赖于摄像头驱动和后端 (DSHOW/MSMF)
         try:
-            # 自动曝光 (Auto Exposure)
-            # 在 DSHOW 后端，0.25 通常表示手动模式，0.75 表示自动模式
-            # 在其他后端，可能是 1 (Manual) 和 3 (Auto)
-            # 我们先尝试设置为手动模式 0.25 (DSHOW)
             self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) 
-            
-            # 设置一个默认的曝光值 (通常是负数，表示 2^n 秒，例如 -4=1/16s, -5=1/32s, -6=1/64s)
-            # 或者在某些驱动下是实际的毫秒数
-            # 建议：如果画面太暗或太亮，可能需要调整此值
             self.stream.set(cv2.CAP_PROP_EXPOSURE, -5.0) 
-
-            # 自动白平衡 (Auto White Balance)
-            self.stream.set(cv2.CAP_PROP_AUTO_WB, 0) # 0 = 关闭
-            # 设置色温 (4000K - 6000K 是常见范围)
+            self.stream.set(cv2.CAP_PROP_AUTO_WB, 0)
             self.stream.set(cv2.CAP_PROP_WB_TEMPERATURE, 4600)
-
-            # 增益 (Gain)
-            # 通常没有独立的自动开关，直接设置值即可锁定
-            # 设置为较低值以减少噪点
             self.stream.set(cv2.CAP_PROP_GAIN, 32) 
-            
             print("尝试关闭自动曝光/白平衡/增益...")
         except Exception as e:
             print(f"设置摄像头手动参数失败: {e}")
@@ -627,10 +577,9 @@ class WebcamVideoStream:
             print("WebcamVideoStream: 无法读取第一帧")
             self.stopped = True
 
-        # 线程同步锁
-        self.read_lock = threading.Lock()
-        
-        # 帧计数器，用于去重
+        # 使用 Queue 替代简单的变量 (Thread-safe)
+        # maxsize 限制队列长度，防止堆积
+        self.frame_queue = queue.Queue(maxsize=queue_size)
         self.frame_id = 0
 
     def start(self):
@@ -650,25 +599,30 @@ class WebcamVideoStream:
             # 读取下一帧
             grabbed, frame = self.stream.read()
             
-            with self.read_lock:
-                self.grabbed = grabbed
-                if grabbed:
-                    self.frame = frame
-                    self.frame_id += 1
-                else:
-                    self.stopped = True
+            if not grabbed:
+                self.stopped = True
+                return
+
+            self.frame_id += 1
+            
+            # 尝试放入队列，如果满了则移除旧的（非阻塞尝试）
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            
+            try:
+                self.frame_queue.put((frame, self.frame_id), block=False)
+            except queue.Full:
+                pass # Should not happen if we just removed one, but safe guard
 
     def read(self):
-        with self.read_lock:
-            # 返回当前帧的副本，防止在处理时被修改
-            # 或者直接返回引用，取决于后续处理是否会修改原图
-            # 为了安全起见，如果不修改原图可以直接返回
-            # 但 ImagePreprocessor 可能会裁切，所以这里直接返回引用即可
-            # 只要调用者不修改 frame 的内容，就是安全的
-            if self.grabbed:
-                return True, self.frame, self.frame_id
-            else:
-                return False, None, -1
+        # 非阻塞获取最新帧
+        try:
+            return True, self.frame_queue.get_nowait()
+        except queue.Empty:
+            return False, (None, -1)
     
     def get(self, propId):
         return self.stream.get(propId)
@@ -678,6 +632,74 @@ class WebcamVideoStream:
         if hasattr(self, 't'):
             self.t.join()
         self.stream.release()
+
+# --- 图像处理与检测线程 (Consumer 1 & Producer 2) ---
+class FrameProcessorThread:
+    def __init__(self, input_queue, output_queue, preprocessor, detector, stop_event):
+        self.input_queue = input_queue
+        self.output_queue = output_queue
+        self.preprocessor = preprocessor
+        self.detector = detector
+        self.stop_event = stop_event
+        self.last_landmarks_norm = None
+        self.thread = threading.Thread(target=self.run)
+        self.thread.daemon = True
+
+    def start(self):
+        self.thread.start()
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                # 阻塞等待输入，超时10ms避免死锁
+                frame_data = self.input_queue.get(timeout=0.01)
+                frame, frame_id = frame_data
+                
+                # 开始处理
+                h, w = frame.shape[:2]
+                
+                # 预处理：ROI -> 放大 -> 滤波 -> 增强
+                processed_frame, roi_info = self.preprocessor.process(frame, self.last_landmarks_norm)
+                
+                # 转换处理后的帧为 RGB
+                processed_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                
+                # MediaPipe 处理
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
+                timestamp_ms = int(time.time() * 1000)
+                detection_result = self.detector.detect_for_video(mp_image, timestamp_ms)
+                
+                # 坐标还原 (Local Normalized -> Global Normalized)
+                self.preprocessor.restore_landmarks(detection_result, roi_info, w, h)
+                
+                # 更新上一帧 Landmarks (用于下一帧 ROI 计算)
+                # 注意：这里是线程内部状态，因为下一帧处理依赖上一帧结果
+                if detection_result.face_landmarks:
+                    self.last_landmarks_norm = detection_result.face_landmarks[0]
+                else:
+                    self.last_landmarks_norm = None
+                
+                # 将结果放入输出队列
+                if self.output_queue.full():
+                     try:
+                        self.output_queue.get_nowait()
+                     except queue.Empty:
+                        pass
+                
+                self.output_queue.put({
+                    'frame': frame,
+                    'frame_id': frame_id,
+                    'detection_result': detection_result,
+                    'roi_info': roi_info,
+                    'processed_frame': processed_frame # Optional, for debug
+                })
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Processing Error: {e}")
+
+
 
 # 初始化管理器
 config_manager = ConfigManager()
@@ -896,18 +918,10 @@ print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
 if int(actual_w) != target_w or int(actual_h) != target_h:
     print(f"警告: 实际分辨率 ({int(actual_w)}x{int(actual_h)}) 与请求分辨率 ({target_w}x{target_h}) 不一致。")
 
-# Camera Matrix for PnP
-frame_w = int(actual_w)
-frame_h = int(actual_h)
-fov = camera_fov
-fov_rad = math.radians(fov)
-focal_length = (frame_w / 2) / math.tan(fov_rad / 2)
-cam_matrix = np.array([
-    [focal_length, 0, frame_w / 2],
-    [0, focal_length, frame_h / 2],
-    [0, 0, 1]
-], dtype="double")
-dist_coeffs = np.zeros((4, 1))
+# Camera Model Initialization (Intrinsics Pre-calculation)
+camera_model = CameraModel(actual_w, actual_h, camera_fov)
+cam_matrix = camera_model.cam_matrix
+dist_coeffs = camera_model.dist_coeffs
 
 # MediaPipe Iris Indices
 LEFT_IRIS = [468, 469, 470, 471, 472]
@@ -917,9 +931,28 @@ RIGHT_IRIS = [473, 474, 475, 476, 477]
 UDP_IP = "127.0.0.1"
 UDP_PORT = 8888
 
-# Start UDP Sender Thread
-sender_thread = threading.Thread(target=udp_sender_thread, args=(UDP_IP, UDP_PORT), daemon=True)
-sender_thread.start()
+# Initialize UDP Socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# sock.setblocking(False) # Removed non-blocking mode to ensure data sending
+print(f"UDP socket initialized. Target: {UDP_IP}:{UDP_PORT}")
+
+# --- Pipeline Initialization ---
+# Queue for processed results (Process -> Main)
+# Main loop will consume this
+processed_queue = queue.Queue(maxsize=2)
+
+# Start Processing Thread
+# video_stream.frame_queue is the input
+processing_thread = FrameProcessorThread(
+    video_stream.frame_queue, 
+    processed_queue, 
+    preprocessor, 
+    detector, 
+    stop_event
+)
+processing_thread.start()
+
+print("Pipeline started: Capture -> Process -> Main Loop")
 
 # FPS 计算相关
 prev_frame_time = 0
@@ -927,18 +960,26 @@ new_frame_time = 0
 last_processed_frame_id = -1
 
 while True:
-    # 读取帧
-    ret, frame, current_frame_id = video_stream.read()
-    if not ret:
-        # print("Error: Could not read frame") # 可能是暂时没有新帧，不一定是错误
-        # 稍微休眠避免死循环占用CPU
-        time.sleep(0.001)
+    # 从处理线程获取结果
+    try:
+        # Timeout 1ms to allow UI updates even if no new frame
+        result_data = processed_queue.get(timeout=0.001)
+    except queue.Empty:
+        # Check if user pressed ESC in opencv window (needs waitKey to process events)
+        if VISUALIZE:
+             if cv2.waitKey(1) & 0xFF == 27:
+                break
         continue
     
-    # 检查是否是重复帧
+    frame = result_data['frame']
+    current_frame_id = result_data['frame_id']
+    detection_result = result_data['detection_result']
+    roi_info = result_data['roi_info']
+    
+    h, w = frame.shape[:2]
+    
+    # 检查是否是重复帧 (虽然 Queue 保证了顺序，但为了安全)
     if current_frame_id == last_processed_frame_id:
-        # 如果是重复帧，休眠一小段时间让出CPU，然后跳过处理
-        time.sleep(0.001)
         continue
         
     last_processed_frame_id = current_frame_id
@@ -952,37 +993,9 @@ while True:
             fps = 1.0 / delta
     prev_frame_time = new_frame_time
     
-    # print("Frame read successfully") # Debug
-
-    
-    # 翻转帧（可选，取决于摄像头是否镜像，这里保持原样以符合用户之前的逻辑）
-    # frame = cv2.flip(frame, 1)
-    
-    h, w = frame.shape[:2]
-    
-    # 预处理：ROI -> 放大 -> 滤波 -> 增强
-    processed_frame, roi_info = preprocessor.process(frame, last_landmarks_norm)
-    
-    # 转换处理后的帧为 RGB
-    processed_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-    
-    # MediaPipe 处理
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
-    timestamp_ms = int(time.time() * 1000)
-    detection_result = detector.detect_for_video(mp_image, timestamp_ms)
-    
-    # 坐标还原 (Local Normalized -> Global Normalized)
-    preprocessor.restore_landmarks(detection_result, roi_info, w, h)
-    
-    # 更新上一帧 Landmarks (用于下一帧 ROI 计算)
-    if detection_result.face_landmarks:
-        last_landmarks_norm = detection_result.face_landmarks[0]
-    else:
-        last_landmarks_norm = None
-        
     # 可视化 ROI (蓝色矩形)
     rx, ry, rw, rh, _ = roi_info
-    if rw < w or rh < h:
+    if VISUALIZE and (rw < w or rh < h):
         cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
     
     eye_points = []
@@ -1008,19 +1021,21 @@ while True:
             # --- 核心修改：在像素层级应用 OneEuro 滤波 ---
             eye_points = tracker.filter_eye_points(raw_eye_points)
             
-            # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
-            f_p1, f_p2 = eye_points
-            cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1, cv2.LINE_AA) # Green for filtered
-            cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1, cv2.LINE_AA)
-            
-            # 绘制原始点作为对比 (红色)
-            cv2.circle(frame, (cx_left, cy_left), 2, (0, 0, 255), -1, cv2.LINE_AA)
-            cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            if VISUALIZE:
+                # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
+                f_p1, f_p2 = eye_points
+                cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1, cv2.LINE_AA) # Green for filtered
+                cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1, cv2.LINE_AA)
+                
+                # 绘制原始点作为对比 (红色)
+                cv2.circle(frame, (cx_left, cy_left), 2, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
             
             # 计算距离和偏移 (使用滤波后的坐标)
-            pixel_dist, estimated_dist = calculate_distance(eye_points, w, h, fov=fov)
+            pixel_dist, estimated_dist = calculate_distance(eye_points, w, h, fov=camera_fov)
             
             # 计算头部姿态并校正距离
+            # 注意：get_head_pose 使用的是 camera_model 计算出的矩阵
             pitch, yaw, roll = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
             
             # 三角变换校正
@@ -1037,56 +1052,58 @@ while True:
             # 更新偏移量 (使用滤波后的坐标和距离)
             tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
 
-            # Update data for UDP sender thread
-            with data_lock:
-                latest_data = {
-                    "distance": float(tracker.current_estimated_dist),
-                    "offset_x": float(tracker.current_offset_x),
-                    "offset_y": float(tracker.current_offset_y)
-                }
+            # Direct UDP Send
+            try:
+                # 格式: "distance,offset_x,offset_y"
+                # 匹配 Unity 端 DataManager.cs 的 ParseAndSetData 解析逻辑 (CSV格式)
+                data_str = f"{tracker.current_estimated_dist:.2f},{tracker.current_offset_x:.2f},{tracker.current_offset_y:.2f}"
+                sock.sendto(data_str.encode('utf-8'), (UDP_IP, UDP_PORT))
+            except Exception as e:
+                print(f"UDP Send Error: {e}")
     else:
         # 如果未检测到人脸，重置滤波器状态以便下次快速收敛
         tracker.reset()
 
-    # --- 绘制信息 ---
-    
-    # 绘制光轴中心（十字准星）
-    center_x, center_y = w // 2, h // 2
-    cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
-    cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
+    if VISUALIZE:
+        # --- 绘制信息 ---
+        
+        # 绘制光轴中心（十字准星）
+        center_x, center_y = w // 2, h // 2
+        cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
+        cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
 
-    # 绘制 FPS (左上角第一行)
-    cv2.putText(frame, f"FPS: {int(fps)} | UDP: {int(current_udp_rate)}Hz", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    
-    # 绘制主视眼标记（黄色圆圈 + 'R'）
-    if tracker.dominant_eye_pos is not None and detection_result.face_landmarks:
-        dx, dy = tracker.dominant_eye_pos
-        if 0 <= dx < w and 0 <= dy < h:
-            cv2.circle(frame, (dx, dy), 8, (0, 255, 255), 2)
-            cv2.putText(frame, "R", (dx + 10, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        # 绘制 FPS (左上角第一行)
+        cv2.putText(frame, f"FPS: {int(fps)}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # 绘制主视眼标记（黄色圆圈 + 'R'）
+        if tracker.dominant_eye_pos is not None and detection_result.face_landmarks:
+            dx, dy = tracker.dominant_eye_pos
+            if 0 <= dx < w and 0 <= dy < h:
+                cv2.circle(frame, (dx, dy), 8, (0, 255, 255), 2)
+                cv2.putText(frame, "R", (dx + 10, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-    if tracker.current_pixel_dist > 0:
-        if tracker.current_estimated_dist > 200:
-            info_text = "too far!"
-            cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        else:
-            info_text = f"Dist: {int(tracker.current_estimated_dist)}cm | PD: {int(tracker.current_pixel_dist)}px"
-            offset_text = f"Offset X: {int(tracker.current_offset_x):+d}cm | Y: {int(tracker.current_offset_y):+d}cm"
-            cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(frame, offset_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # 绘制瞳孔间距线 (使用滤波后的点)
-            if len(eye_points) >= 2:
-                p1 = (int(eye_points[0][0]), int(eye_points[0][1]))
-                p2 = (int(eye_points[1][0]), int(eye_points[1][1]))
-                cv2.line(frame, p1, p2, (255, 255, 0), 2)
+        if tracker.current_pixel_dist > 0:
+            if tracker.current_estimated_dist > 200:
+                info_text = "too far!"
+                cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            else:
+                info_text = f"Dist: {int(tracker.current_estimated_dist)}cm | PD: {int(tracker.current_pixel_dist)}px"
+                offset_text = f"Offset X: {int(tracker.current_offset_x):+d}cm | Y: {int(tracker.current_offset_y):+d}cm"
+                cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(frame, offset_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
+                # 绘制瞳孔间距线 (使用滤波后的点)
+                if len(eye_points) >= 2:
+                    p1 = (int(eye_points[0][0]), int(eye_points[0][1]))
+                    p2 = (int(eye_points[1][0]), int(eye_points[1][1]))
+                    cv2.line(frame, p1, p2, (255, 255, 0), 2)
 
-    # 显示结果
-    cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
-    
-    # 按ESC键退出
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+        # 显示结果
+        cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
+        
+        # 按ESC键退出
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
 # 释放资源
 stop_event.set()
