@@ -246,9 +246,22 @@ class EyeTracker:
 
 class ImagePreprocessor:
     def __init__(self):
-        self.last_roi = None # (x, y, w, h)
+        self.last_roi = None
         self.alpha = 0.7 # ROI smoothing factor (0-1)
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        
+        # 检查 OpenCV CUDA 支持
+        self.use_cuda = False
+        try:
+            if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                self.use_cuda = True
+                self.clahe_cuda = cv2.cuda.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                print(f"CUDA 加速已启用: {cv2.cuda.getCudaEnabledDeviceCount()} 个设备检测到")
+            else:
+                print("未检测到 CUDA 设备，使用 CPU 处理")
+        except Exception as e:
+            print(f"CUDA 初始化失败: {e}")
+            self.use_cuda = False
 
     def process(self, frame, last_landmarks=None):
         """
@@ -279,17 +292,44 @@ class ImagePreprocessor:
             scale_factor = target_min_size / min_dim
             new_w = int(w * scale_factor)
             new_h = int(h * scale_factor)
-            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            
+            if self.use_cuda:
+                try:
+                    # GPU Upscaling
+                    gpu_crop = cv2.cuda_GpuMat()
+                    gpu_crop.upload(crop)
+                    
+                    # Resize
+                    gpu_crop = cv2.cuda.resize(gpu_crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    
+                    # Contrast Enhancement (CLAHE on L channel)
+                    gpu_lab = cv2.cuda.cvtColor(gpu_crop, cv2.COLOR_BGR2LAB)
+                    gpu_l, gpu_a, gpu_b = cv2.cuda.split(gpu_lab)
+                    
+                    gpu_l = self.clahe_cuda.apply(gpu_l)
+                    
+                    gpu_lab = cv2.cuda.merge((gpu_l, gpu_a, gpu_b))
+                    gpu_crop = cv2.cuda.cvtColor(gpu_lab, cv2.COLOR_LAB2BGR)
+                    
+                    crop = gpu_crop.download()
+                    
+                except Exception as e:
+                    # Fallback to CPU if GPU fails during runtime
+                    print(f"GPU Error, fallback to CPU: {e}")
+                    self.use_cuda = False # Disable for future frames
+                    crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
-        # 3. Bilateral Filter (Edge-preserving smoothing)
-        # crop = cv2.bilateralFilter(crop, d=5, sigmaColor=75, sigmaSpace=75)
-        
-        # 4. Contrast Enhancement (CLAHE on L channel)
-        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l2 = self.clahe.apply(l)
-        lab = cv2.merge((l2, a, b))
-        crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        if not self.use_cuda or min_dim >= target_min_size:
+            # 4. Contrast Enhancement (CLAHE on L channel) - CPU version
+            # Only run if not already done on GPU
+            if not (self.use_cuda and min_dim < target_min_size):
+                lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                l2 = self.clahe.apply(l)
+                lab = cv2.merge((l2, a, b))
+                crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
         
         return crop, (x, y, w, h, scale_factor)
 
@@ -456,17 +496,38 @@ preprocessor = ImagePreprocessor()
 last_landmarks_norm = None
 
 # Initialize MediaPipe Face Landmarker
-base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
-options = vision.FaceLandmarkerOptions(
-    base_options=base_options,
-    output_face_blendshapes=False,
-    output_facial_transformation_matrixes=False,
-    num_faces=1,
-    min_face_detection_confidence=0.5,
-    min_face_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
-    running_mode=vision.RunningMode.VIDEO)
-detector = vision.FaceLandmarker.create_from_options(options)
+detector = None
+try:
+    print("尝试使用 GPU 加速初始化 MediaPipe...")
+    base_options = python.BaseOptions(
+        model_asset_path='face_landmarker.task',
+        delegate=python.BaseOptions.Delegate.GPU
+    )
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        running_mode=vision.RunningMode.VIDEO)
+    detector = vision.FaceLandmarker.create_from_options(options)
+    print("MediaPipe GPU 加速已启用")
+except Exception as e:
+    print(f"MediaPipe GPU 初始化失败，回退到 CPU: {e}")
+    # Fallback to CPU
+    base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        running_mode=vision.RunningMode.VIDEO)
+    detector = vision.FaceLandmarker.create_from_options(options)
 
 import json
 import os
@@ -967,7 +1028,7 @@ while True:
     except queue.Empty:
         # Check if user pressed ESC in opencv window (needs waitKey to process events)
         if VISUALIZE:
-             if cv2.waitKey(1) & 0xFF == 27:
+            if cv2.waitKey(1) & 0xFF == 27:
                 break
         continue
     
