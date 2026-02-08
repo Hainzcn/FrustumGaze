@@ -539,27 +539,229 @@ options = vision.FaceLandmarkerOptions(
     running_mode=vision.RunningMode.VIDEO)
 detector = vision.FaceLandmarker.create_from_options(options)
 
+import json
+import os
+
+# --- 持久化存储管理 ---
+
+class ConfigManager:
+    def __init__(self, config_dir="config"):
+        self.config_dir = config_dir
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+            
+        self.cameras_config_path = os.path.join(self.config_dir, "cameras.json")
+        self.user_config_path = os.path.join(self.config_dir, "user_prefs.json")
+        
+        self.cameras_data = self._load_json(self.cameras_config_path)
+        self.user_prefs = self._load_json(self.user_config_path)
+
+    def _load_json(self, path):
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def _save_json(self, path, data):
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+
+    # --- 摄像头数据管理 ---
+    def update_camera(self, device_index, fov=None, name=None, user_configured=False):
+        idx_str = str(device_index)
+        if idx_str not in self.cameras_data:
+            self.cameras_data[idx_str] = {
+                "name": f"Camera {device_index}",
+                "fov": 60.0,
+                "user_configured": False
+            }
+        
+        if fov is not None:
+            self.cameras_data[idx_str]["fov"] = fov
+        if name is not None:
+            self.cameras_data[idx_str]["name"] = name
+        if user_configured:
+            self.cameras_data[idx_str]["user_configured"] = True
+            
+        self._save_json(self.cameras_config_path, self.cameras_data)
+
+    def get_camera_info(self, device_index):
+        idx_str = str(device_index)
+        return self.cameras_data.get(idx_str)
+
+    # --- 用户偏好管理 ---
+    def set_last_camera(self, index):
+        self.user_prefs['last_camera_index'] = index
+        self._save_json(self.user_config_path, self.user_prefs)
+
+    def get_last_camera(self):
+        return self.user_prefs.get('last_camera_index')
+
+# 初始化管理器
+config_manager = ConfigManager()
+
+# 摄像头选择逻辑
+def select_camera_device():
+    print("正在扫描摄像头设备...")
+    available_indices = []
+    # 扫描常用索引 0-4
+    for i in range(5):
+        # 尝试快速打开检测 (优先 DSHOW)
+        temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if not temp_cap.isOpened():
+            temp_cap = cv2.VideoCapture(i, cv2.CAP_ANY)
+        
+        if temp_cap.isOpened():
+            available_indices.append(i)
+            # 自动存入/更新配置文件
+            config_manager.update_camera(i)
+            temp_cap.release()
+    
+    if not available_indices:
+        print("错误：未检测到摄像头设备。")
+        return None, 60.0
+        
+    selected_index = None
+    
+    # 尝试自动加载上次使用的摄像头
+    last_index = config_manager.get_last_camera()
+    if last_index is not None and last_index in available_indices:
+        print(f"检测到上次使用的摄像头 (索引 {last_index})，按 Enter 自动选择，或输入其他索引...")
+    
+    if len(available_indices) == 1:
+        print(f"检测到单个摄像头 (索引 {available_indices[0]})，自动连接。")
+        selected_index = available_indices[0]
+    else:
+        print("检测到多个摄像头设备：")
+        for idx in available_indices:
+            info = config_manager.get_camera_info(idx)
+            fov_display = ""
+            name_display = ""
+            if info:
+                fov_display = f" (FOV: {info['fov']}°)"
+                name_display = f" [{info['name']}]"
+                
+            marker = " *" if idx == last_index else ""
+            print(f" - 设备索引: {idx}{name_display}{fov_display}{marker}")
+            
+        while True:
+            try:
+                prompt = f"请输入要使用的摄像头索引 {available_indices}"
+                if last_index is not None and last_index in available_indices:
+                    prompt += f" [默认 {last_index}]"
+                prompt += ": "
+                
+                selection = input(prompt).strip()
+                
+                if not selection and last_index is not None and last_index in available_indices:
+                    selected_index = last_index
+                    break
+                
+                idx = int(selection)
+                if idx in available_indices:
+                    selected_index = idx
+                    break
+                else:
+                    print("输入的索引无效，请重新输入。")
+            except ValueError:
+                print("输入格式错误，请输入数字索引。")
+    
+    # 保存选择
+    config_manager.set_last_camera(selected_index)
+    
+    # 获取FOV参数
+    saved_info = config_manager.get_camera_info(selected_index)
+    default_fov = saved_info['fov'] if saved_info else 60.0
+    
+    # 检查是否已有用户配置
+    if saved_info and saved_info.get("user_configured", False):
+        print(f"检测到已保存的配置参数：FOV {default_fov}° (跳过输入)")
+        return selected_index, default_fov
+    
+    while True:
+        try:
+            fov_input = input(f"请输入摄像头FOV(视场角) [默认{default_fov}]: ").strip()
+            if not fov_input:
+                fov_val = default_fov
+            else:
+                fov_val = float(fov_input)
+            
+            if 0 < fov_val < 180:
+                # 用户确认输入后，更新配置文件并标记为已配置
+                config_manager.update_camera(selected_index, fov=fov_val, user_configured=True)
+                print(f"已保存配置：索引 {selected_index}, FOV {fov_val}°")
+                return selected_index, fov_val
+            else:
+                print("FOV必须在0到180之间。")
+        except ValueError:
+            print("输入格式错误，请输入数字。")
+
+camera_index, camera_fov = select_camera_device()
+if camera_index is None:
+    exit()
+
 # 打开摄像头，尝试不同的API
 cap = None
 for api in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
-    cap = cv2.VideoCapture(0, api)
+    cap = cv2.VideoCapture(camera_index, api)
     if cap.isOpened():
         print(f"Using API: {api}")
         break
 
 if not cap or not cap.isOpened():
-    print("Error: Could not open camera")
+    print(f"Error: Could not open camera {camera_index}")
     exit()
 
 # 设置摄像头参数
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# 优先尝试获取摄像头支持的最高规格视频流（从1080p开始尝试）
+target_resolutions = [
+    (3840, 2160), # 4K
+    (2560, 1440), # 2K
+    (1920, 1080), # 1080p
+]
+
+print("正在尝试设置高分辨率...")
+current_w = 0
+current_h = 0
+
+# 1. 首先尝试设置列表中的高分辨率
+for w, h in target_resolutions:
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    
+    # 检查实际生效的分辨率
+    aw = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    ah = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    
+    if int(aw) == w and int(ah) == h:
+        print(f"成功设置分辨率: {w}x{h}")
+        current_w = aw
+        current_h = ah
+        break
+    else:
+        # 如果设置失败，记录当前实际值，继续尝试下一个
+        # 注意：有些驱动在设置不支持的高分辨率时，会回退到它支持的最大分辨率
+        # 所以如果实际值已经很高（比如我们设4K它给了1080p），也可以接受
+        if aw >= 1920 and ah >= 1080:
+            print(f"请求 {w}x{h} -> 实际获得 {int(aw)}x{int(ah)} (已满足高规格要求)")
+            current_w = aw
+            current_h = ah
+            break
+
 cap.set(cv2.CAP_PROP_FPS, 30)
 
+# 读取最终实际分辨率
+actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
+
 # Camera Matrix for PnP
-frame_w = 640
-frame_h = 480
-fov = 60.0
+frame_w = int(actual_w)
+frame_h = int(actual_h)
+fov = camera_fov
 fov_rad = math.radians(fov)
 focal_length = (frame_w / 2) / math.tan(fov_rad / 2)
 cam_matrix = np.array([
@@ -650,7 +852,7 @@ while True:
             cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
             
             # 计算距离和偏移 (使用滤波后的坐标)
-            pixel_dist, estimated_dist = calculate_distance(eye_points, w, h)
+            pixel_dist, estimated_dist = calculate_distance(eye_points, w, h, fov=fov)
             
             # 计算头部姿态并校正距离
             pitch, yaw, roll = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
