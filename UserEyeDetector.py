@@ -7,109 +7,66 @@ from mediapipe.tasks.python import vision
 import time
 import socket
 import threading
-from collections import deque
 # from scipy.interpolate import CubicSpline
 
-# Global variables for thread communication
+# 全局变量用于线程间通信
+latest_data = None
 data_lock = threading.Lock()
-# Buffer to store (timestamp, dist, offset_x, offset_y)
-# Storing enough history for interpolation
-data_buffer = deque(maxlen=20)
-is_running = True
+stop_event = threading.Event()
+current_udp_rate = 0  # 用于存储 UDP 发送频率
 
-# UDP Configuration
-UDP_IP = "127.0.0.1"
-UDP_PORT = 8888
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def udp_sender_thread(ip, port):
+    global latest_data, current_udp_rate
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    # 目标发送频率
+    target_fps = 60.0
+    interval = 1.0 / target_fps
+    
+    last_send_time = time.time()
+    
+    # 频率统计相关
+    send_count = 0
+    last_rate_update_time = time.time()
+    
+    print(f"UDP 发送线程已启动，目标地址: {ip}:{port}")
+    
+    while not stop_event.is_set():
+        current_time = time.time()
+        
+        # 频率统计更新 (每秒更新一次)
+        if current_time - last_rate_update_time >= 1.0:
+            current_udp_rate = send_count / (current_time - last_rate_update_time)
+            send_count = 0
+            last_rate_update_time = current_time
 
-def udp_sender_thread():
-    """
-    Thread to send upsampled data via UDP at 60Hz using Cubic Spline Interpolation
-    """
-    global is_running
-    
-    # Target frequency 60Hz
-    interval = 1.0 / 60.0
-    # Interpolation delay (seconds) to ensure we interpolate instead of extrapolate
-    # Here 33.3ms at least, or it won't work
-    delay = 0.04
-    
-    print("UDP Sender Thread Started (60Hz - Linear Interpolation)")
-    
-    while is_running:
-        start_time = time.time()
+        if current_time - last_send_time >= interval:
+            data_to_send = None
+            with data_lock:
+                if latest_data:
+                    data_to_send = latest_data.copy()
+            
+            if data_to_send:
+                try:
+                    # JSON 序列化
+                    json_data = json.dumps(data_to_send)
+                    # 发送数据
+                    sock.sendto(json_data.encode('utf-8'), (ip, port))
+                    send_count += 1
+                except Exception as e:
+                    print(f"UDP 发送错误: {e}")
+            
+            # 更新最后发送时间，保持稳定的发送频率
+            # 使用简单的累加方式可能会导致漂移，这里直接用当前时间
+            # 为了更精确的 60Hz，可以考虑 sleep
+            last_send_time = current_time
         
-        current_data = []
-        with data_lock:
-            # Need at least 2 points for linear interpolation
-            if len(data_buffer) >= 2:
-                current_data = list(data_buffer)
-        
-        if len(current_data) >= 2:
-            # Target time for interpolation
-            target_time = time.time() - delay
-            
-            # Find the two points bounding the target_time
-            # data_buffer is ordered by time (oldest first)
-            p1 = None
-            p2 = None
-            
-            # Search for the interval [p1, p2] that contains target_time
-            # Since current_data is sorted by time, we can iterate
-            for i in range(len(current_data) - 1):
-                if current_data[i][0] <= target_time <= current_data[i+1][0]:
-                    p1 = current_data[i]
-                    p2 = current_data[i+1]
-                    break
-            
-            val_dist = 0
-            val_x = 0
-            val_y = 0
-            
-            found_interval = False
-            if p1 is not None and p2 is not None:
-                found_interval = True
-                # Linear Interpolation (Lerp)
-                t1, d1, x1, y1 = p1
-                t2, d2, x2, y2 = p2
-                
-                # Calculate ratio (0.0 to 1.0)
-                if t2 - t1 > 0.0001: # Avoid division by zero
-                    ratio = (target_time - t1) / (t2 - t1)
-                else:
-                    ratio = 0
-                
-                val_dist = d1 + (d2 - d1) * ratio
-                val_x = x1 + (x2 - x1) * ratio
-                val_y = y1 + (y2 - y1) * ratio
-            else:
-                # Fallback if out of range
-                if target_time < current_data[0][0]:
-                    # Too old? Use oldest
-                    _, val_dist, val_x, val_y = current_data[0]
-                elif target_time > current_data[-1][0]:
-                    # Too new? Use newest
-                    _, val_dist, val_x, val_y = current_data[-1]
-                else:
-                    # Should be covered by loop, but just in case
-                    _, val_dist, val_x, val_y = current_data[-1]
+        # 短暂休眠以避免占用过多 CPU，同时保持响应速度
+        # 60Hz 意味着每 16ms 发送一次，休眠 1-2ms 是安全的
+        time.sleep(0.002)
 
-            try:
-                # Send UDP
-                # Format: distance,offset_x,offset_y (保留1位小数)
-                message_str = f"{val_dist:.1f},{val_x:.1f},{val_y:.1f}"
-                sock.sendto(message_str.encode('utf-8'), (UDP_IP, UDP_PORT))
-                # if found_interval:
-                #    print(f"Sent UDP (Lerp): {message_str}")
-                
-            except Exception as e:
-                print(f"UDP Error: {e}")
-        
-        # Maintain 60Hz loop
-        elapsed = time.time() - start_time
-        sleep_time = interval - elapsed
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+    sock.close()
+    print("UDP 发送线程已停止")
 
 # --- 1€ Filter Implementation for Stability & Responsiveness ---
 class OneEuroFilter:
@@ -956,8 +913,12 @@ dist_coeffs = np.zeros((4, 1))
 LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
+# UDP Configuration
+UDP_IP = "127.0.0.1"
+UDP_PORT = 8888
+
 # Start UDP Sender Thread
-sender_thread = threading.Thread(target=udp_sender_thread, daemon=True)
+sender_thread = threading.Thread(target=udp_sender_thread, args=(UDP_IP, UDP_PORT), daemon=True)
 sender_thread.start()
 
 # FPS 计算相关
@@ -1076,9 +1037,13 @@ while True:
             # 更新偏移量 (使用滤波后的坐标和距离)
             tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
 
-            # Update buffer for UDP upsampling thread
+            # Update data for UDP sender thread
             with data_lock:
-                data_buffer.append((time.time(), tracker.current_estimated_dist, tracker.current_offset_x, tracker.current_offset_y))
+                latest_data = {
+                    "distance": float(tracker.current_estimated_dist),
+                    "offset_x": float(tracker.current_offset_x),
+                    "offset_y": float(tracker.current_offset_y)
+                }
     else:
         # 如果未检测到人脸，重置滤波器状态以便下次快速收敛
         tracker.reset()
@@ -1091,7 +1056,7 @@ while True:
     cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
 
     # 绘制 FPS (左上角第一行)
-    cv2.putText(frame, f"FPS: {int(fps)}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(frame, f"FPS: {int(fps)} | UDP: {int(current_udp_rate)}Hz", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     # 绘制主视眼标记（黄色圆圈 + 'R'）
     if tracker.dominant_eye_pos is not None and detection_result.face_landmarks:
@@ -1124,6 +1089,6 @@ while True:
         break
 
 # 释放资源
-is_running = False
+stop_event.set()
 video_stream.stop()
 cv2.destroyAllWindows()
