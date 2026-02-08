@@ -681,9 +681,9 @@ class FrameProcessorThread:
                 
                 # 将结果放入输出队列
                 if self.output_queue.full():
-                     try:
+                    try:
                         self.output_queue.get_nowait()
-                     except queue.Empty:
+                    except queue.Empty:
                         pass
                 
                 self.output_queue.put({
@@ -967,7 +967,7 @@ while True:
     except queue.Empty:
         # Check if user pressed ESC in opencv window (needs waitKey to process events)
         if VISUALIZE:
-             if cv2.waitKey(1) & 0xFF == 27:
+            if cv2.waitKey(1) & 0xFF == 27:
                 break
         continue
     
