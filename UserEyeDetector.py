@@ -602,6 +602,126 @@ class ConfigManager:
     def get_last_camera(self):
         return self.user_prefs.get('last_camera_index')
 
+# --- 视频流获取优化 ---
+class WebcamVideoStream:
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY):
+        self.src = src
+        self.width = width
+        self.height = height
+        self.api_preference = api_preference
+        
+        # 初始化摄像头
+        self.stream = cv2.VideoCapture(self.src, self.api_preference)
+        
+        # 优化配置
+        # 1. 强制 MJPEG 压缩 (如果摄像头支持)
+        # 这通常能显著提高高分辨率下的帧率 (减少USB带宽占用)
+        self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        
+        # 2. 设置分辨率
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        
+        # 3. 设置 FPS (尝试请求30，实际取决于光照和带宽)
+        self.stream.set(cv2.CAP_PROP_FPS, 30)
+        
+        # 4. 减少 OpenCV 内部缓冲区
+        # 设置为1确保我们总是获取最新的帧，减少延迟
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # 5. 关闭自动曝光、白平衡、增益
+        # 注意：这些设置高度依赖于摄像头驱动和后端 (DSHOW/MSMF)
+        try:
+            # 自动曝光 (Auto Exposure)
+            # 在 DSHOW 后端，0.25 通常表示手动模式，0.75 表示自动模式
+            # 在其他后端，可能是 1 (Manual) 和 3 (Auto)
+            # 我们先尝试设置为手动模式 0.25 (DSHOW)
+            self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) 
+            
+            # 设置一个默认的曝光值 (通常是负数，表示 2^n 秒，例如 -4=1/16s, -5=1/32s, -6=1/64s)
+            # 或者在某些驱动下是实际的毫秒数
+            # 建议：如果画面太暗或太亮，可能需要调整此值
+            self.stream.set(cv2.CAP_PROP_EXPOSURE, -5.0) 
+
+            # 自动白平衡 (Auto White Balance)
+            self.stream.set(cv2.CAP_PROP_AUTO_WB, 0) # 0 = 关闭
+            # 设置色温 (4000K - 6000K 是常见范围)
+            self.stream.set(cv2.CAP_PROP_WB_TEMPERATURE, 4600)
+
+            # 增益 (Gain)
+            # 通常没有独立的自动开关，直接设置值即可锁定
+            # 设置为较低值以减少噪点
+            self.stream.set(cv2.CAP_PROP_GAIN, 32) 
+            
+            print("尝试关闭自动曝光/白平衡/增益...")
+        except Exception as e:
+            print(f"设置摄像头手动参数失败: {e}")
+        
+        # 检查是否成功打开
+        if not self.stream.isOpened():
+            print("WebcamVideoStream: 无法打开摄像头")
+            self.stopped = True
+        else:
+            self.stopped = False
+            
+        # 读取第一帧确认
+        (self.grabbed, self.frame) = self.stream.read()
+        if not self.grabbed:
+            print("WebcamVideoStream: 无法读取第一帧")
+            self.stopped = True
+
+        # 线程同步锁
+        self.read_lock = threading.Lock()
+        
+        # 帧计数器，用于去重
+        self.frame_id = 0
+
+    def start(self):
+        if self.stopped:
+            return self
+        print("启动视频流读取线程...")
+        self.t = threading.Thread(target=self.update, args=())
+        self.t.daemon = True
+        self.t.start()
+        return self
+
+    def update(self):
+        while True:
+            if self.stopped:
+                return
+            
+            # 读取下一帧
+            grabbed, frame = self.stream.read()
+            
+            with self.read_lock:
+                self.grabbed = grabbed
+                if grabbed:
+                    self.frame = frame
+                    self.frame_id += 1
+                else:
+                    self.stopped = True
+
+    def read(self):
+        with self.read_lock:
+            # 返回当前帧的副本，防止在处理时被修改
+            # 或者直接返回引用，取决于后续处理是否会修改原图
+            # 为了安全起见，如果不修改原图可以直接返回
+            # 但 ImagePreprocessor 可能会裁切，所以这里直接返回引用即可
+            # 只要调用者不修改 frame 的内容，就是安全的
+            if self.grabbed:
+                return True, self.frame, self.frame_id
+            else:
+                return False, None, -1
+    
+    def get(self, propId):
+        return self.stream.get(propId)
+
+    def stop(self):
+        self.stopped = True
+        if hasattr(self, 't'):
+            self.t.join()
+        self.stream.release()
+
 # 初始化管理器
 config_manager = ConfigManager()
 
@@ -755,9 +875,9 @@ def select_resolution(cap, camera_index, config_manager):
         try:
             choice = input(f"请输入分辨率编号 [0-{len(available_resolutions)-1}]: ").strip()
             if not choice:
-                 # 默认选第一个（通常是最高的）
-                 selected_res = available_resolutions[0]
-                 break
+                # 默认选第一个（通常是最高的）
+                selected_res = available_resolutions[0]
+                break
             
             idx = int(choice)
             if 0 <= idx < len(available_resolutions):
@@ -779,30 +899,40 @@ if camera_index is None:
     exit()
 
 # 打开摄像头，尝试不同的API
-cap = None
+cap_temp = None
+used_api = cv2.CAP_ANY
+
 for api in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
-    cap = cv2.VideoCapture(camera_index, api)
-    if cap.isOpened():
-        print(f"Using API: {api}")
+    cap_temp = cv2.VideoCapture(camera_index, api)
+    if cap_temp.isOpened():
+        print(f"检测到可用 API: {api}")
+        used_api = api
         break
 
-if not cap or not cap.isOpened():
+if not cap_temp or not cap_temp.isOpened():
     print(f"Error: Could not open camera {camera_index}")
     exit()
 
 # 设置摄像头参数
 # 使用用户选择或保存的分辨率
-target_w, target_h = select_resolution(cap, camera_index, config_manager)
+# 注意：select_resolution 会操作 cap_temp 来测试分辨率
+target_w, target_h = select_resolution(cap_temp, camera_index, config_manager)
 
-print(f"正在设置分辨率: {target_w}x{target_h}")
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+# 释放临时 cap，准备使用 WebcamVideoStream 接管
+cap_temp.release()
 
-cap.set(cv2.CAP_PROP_FPS, 30)
+print(f"正在启动优化视频流 (MJPEG, 独立线程)...")
+print(f"目标分辨率: {target_w}x{target_h}")
+
+# 初始化多线程视频流
+video_stream = WebcamVideoStream(src=camera_index, width=target_w, height=target_h, api_preference=used_api).start()
+
+# 等待摄像头预热
+time.sleep(1.0)
 
 # 读取最终实际分辨率
-actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+actual_w = video_stream.get(cv2.CAP_PROP_FRAME_WIDTH)
+actual_h = video_stream.get(cv2.CAP_PROP_FRAME_HEIGHT)
 print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
 
 # 如果设置失败，给出警告
@@ -833,13 +963,24 @@ sender_thread.start()
 # FPS 计算相关
 prev_frame_time = 0
 new_frame_time = 0
+last_processed_frame_id = -1
 
 while True:
     # 读取帧
-    ret, frame = cap.read()
+    ret, frame, current_frame_id = video_stream.read()
     if not ret:
-        print("Error: Could not read frame")
-        break
+        # print("Error: Could not read frame") # 可能是暂时没有新帧，不一定是错误
+        # 稍微休眠避免死循环占用CPU
+        time.sleep(0.001)
+        continue
+    
+    # 检查是否是重复帧
+    if current_frame_id == last_processed_frame_id:
+        # 如果是重复帧，休眠一小段时间让出CPU，然后跳过处理
+        time.sleep(0.001)
+        continue
+        
+    last_processed_frame_id = current_frame_id
     
     # 计算 FPS
     new_frame_time = time.time()
@@ -984,5 +1125,5 @@ while True:
 
 # 释放资源
 is_running = False
-cap.release()
+video_stream.stop()
 cv2.destroyAllWindows()
