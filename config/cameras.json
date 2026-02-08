@@ -6,7 +6,8 @@
         "resolution": [
             640,
             480
-        ]
+        ],
+        "exposure": -7.0
     },
     "1": {
         "name": "Camera 1",
@@ -15,6 +16,7 @@
         "resolution": [
             2560,
             1440
-        ]
+        ],
+        "exposure": -5.0
     }
 }

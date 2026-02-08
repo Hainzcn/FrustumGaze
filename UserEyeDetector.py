@@ -381,50 +381,191 @@ class ImagePreprocessor:
 # 计算头部姿态（Yaw角）用于距离校正
 def get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs):
     # 2D 图像点 (使用 MediaPipe 关键点索引)
-    # Nose tip: 1, Chin: 152, Left Eye Left Corner: 33, Right Eye Right Corner: 263, Left Mouth Corner: 61, Right Mouth Corner: 291
+    # 扩展至 11 个关键点以提高稳定性
+    # 1: Nose Tip
+    # 152: Chin
+    # 33: Left Eye Outer
+    # 263: Right Eye Outer
+    # 61: Left Mouth Corner
+    # 291: Right Mouth Corner
+    # 133: Left Eye Inner
+    # 362: Right Eye Inner
+    # 70: Left Eyebrow Outer
+    # 300: Right Eyebrow Outer
+    # 2: Nose Bottom
+    
     image_points = np.array([
         (face_landmarks[1].x * w, face_landmarks[1].y * h),     # Nose tip
         (face_landmarks[152].x * w, face_landmarks[152].y * h), # Chin
-        (face_landmarks[33].x * w, face_landmarks[33].y * h),   # Left eye left corner
-        (face_landmarks[263].x * w, face_landmarks[263].y * h), # Right eye right corner
-        (face_landmarks[61].x * w, face_landmarks[61].y * h),   # Left Mouth corner
-        (face_landmarks[291].x * w, face_landmarks[291].y * h)  # Right mouth corner
+        (face_landmarks[33].x * w, face_landmarks[33].y * h),   # Left eye outer
+        (face_landmarks[263].x * w, face_landmarks[263].y * h), # Right eye outer
+        (face_landmarks[61].x * w, face_landmarks[61].y * h),   # Left mouth corner
+        (face_landmarks[291].x * w, face_landmarks[291].y * h), # Right mouth corner
+        (face_landmarks[133].x * w, face_landmarks[133].y * h), # Left eye inner
+        (face_landmarks[362].x * w, face_landmarks[362].y * h), # Right eye inner
+        (face_landmarks[70].x * w, face_landmarks[70].y * h),   # Left eyebrow outer
+        (face_landmarks[300].x * w, face_landmarks[300].y * h), # Right eyebrow outer
+        (face_landmarks[2].x * w, face_landmarks[2].y * h)      # Nose bottom
     ], dtype="double")
 
-    # 3D 模型点 (通用人脸模型)
+    # 3D 模型点 (通用人脸模型，单位：任意单位，比例约 50 units/cm)
+    # 坐标系：X 右, Y 上, Z 前 (相对面部中心)
     model_points = np.array([
         (0.0, 0.0, 0.0),             # Nose tip
-        (0.0, -330.0, -65.0),        # Chin
-        (0.0, 0.0, 0.0),             # Nose tip
-        (0.0, -330.0, -65.0),        # Chin
-        (-225.0, 170.0, -135.0),     # Left eye left corner
-        (225.0, 170.0, -135.0),      # Right eye right corner
-        (-150.0, -150.0, -125.0),    # Left Mouth corner
-        (150.0, -150.0, -125.0)      # Right mouth corner
-    ], dtype="double")
-    
-    # Correct model points to match image points count (6 points)
-    model_points = np.array([
-        (0.0, 0.0, 0.0),             # Nose tip
-        (0.0, -330.0, -65.0),        # Chin
-        (-225.0, 170.0, -135.0),     # Left eye left corner
-        (225.0, 170.0, -135.0),      # Right eye right corner
-        (-150.0, -150.0, -125.0),    # Left Mouth corner
-        (150.0, -150.0, -125.0)      # Right mouth corner
+        (0.0, -500.0, -300.0),       # Chin
+        (-225.0, 170.0, -135.0),     # Left eye outer
+        (225.0, 170.0, -135.0),      # Right eye outer
+        (-150.0, -150.0, -125.0),    # Left mouth corner
+        (150.0, -150.0, -125.0),     # Right mouth corner
+        (-90.0, 170.0, -120.0),      # Left eye inner
+        (90.0, 170.0, -120.0),       # Right eye inner
+        (-250.0, 300.0, -100.0),     # Left eyebrow outer
+        (250.0, 300.0, -100.0),      # Right eyebrow outer
+        (0.0, -80.0, -50.0)          # Nose bottom
     ], dtype="double")
 
     # PnP 求解
     (success, rotation_vector, translation_vector) = cv2.solvePnP(model_points, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_EPNP)
 
     if not success:
-        return 0, 0, 0
+        return 0, 0, 0, None, None
 
     # 计算欧拉角
     rmat, jac = cv2.Rodrigues(rotation_vector)
     angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
     
     # angles[0]=pitch, angles[1]=yaw, angles[2]=roll
-    return angles[0], angles[1], angles[2]
+    return angles[0], angles[1], angles[2], rotation_vector, translation_vector
+
+def calculate_single_eye_gaze(iris_center_2d, eye_center_model_3d, rvec, tvec, cam_matrix, dist_coeffs):
+    """
+    计算单眼视线向量
+    :param iris_center_2d: (x, y) 像素坐标
+    :param eye_center_model_3d: (x, y, z) 模型坐标系下的眼球中心
+    :param rvec: 头部旋转向量
+    :param tvec: 头部平移向量
+    :param cam_matrix: 相机内参
+    :return: (gaze_vector_3d, eye_center_cam_3d) 相机坐标系下的视线向量和眼球中心
+    """
+    # 1. 将眼球中心变换到相机坐标系
+    rmat, _ = cv2.Rodrigues(rvec)
+    eye_center_cam = np.dot(rmat, eye_center_model_3d) + tvec.reshape(3)
+    
+    # 2. 将虹膜 2D 点反投影为射线 (相机坐标系)
+    # Undistort points first? Assuming small distortion or raw coordinates for simplicity
+    # Ray direction: inv(K) * [u, v, 1]
+    p_iris_h = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
+    ray_dir = np.dot(np.linalg.inv(cam_matrix), p_iris_h)
+    ray_dir = ray_dir / np.linalg.norm(ray_dir) # Normalize
+    
+    # 3. 计算射线与眼球球面的交点 (或者近似)
+    # Sphere: Center = eye_center_cam, Radius = 60 (12mm * 50 units/cm)
+    radius = 60.0
+    
+    # Ray: O = (0,0,0), D = ray_dir
+    # Intersection: |t*D - C|^2 = r^2
+    # t^2 - 2(C.D)t + |C|^2 - r^2 = 0
+    C = eye_center_cam
+    a = 1.0
+    b = -2.0 * np.dot(C, ray_dir)
+    c_val = np.dot(C, C) - radius**2
+    
+    discriminant = b**2 - 4*a*c_val
+    
+    if discriminant >= 0:
+        # Ray intersects sphere
+        t1 = (-b - math.sqrt(discriminant)) / (2*a)
+        t2 = (-b + math.sqrt(discriminant)) / (2*a)
+        t = min(t1, t2) if t1 > 0 and t2 > 0 else max(t1, t2) # Should be positive
+        
+        if t > 0:
+            iris_on_sphere = t * ray_dir
+            gaze_vector = iris_on_sphere - eye_center_cam
+            return gaze_vector, eye_center_cam
+            
+    # Fallback: 如果没有交点（计算误差），使用射线上的最近点
+    # Closest point on ray to C is at t = C.D
+    t_closest = np.dot(C, ray_dir)
+    closest_point = t_closest * ray_dir
+    # 强制长度为半径
+    vec = closest_point - eye_center_cam
+    vec_norm = np.linalg.norm(vec)
+    if vec_norm > 0:
+        gaze_vector = vec / vec_norm * radius
+    else:
+        # Fallback to head forward direction (Z-axis of head in camera space)
+        # Head Z-axis in camera space is the 3rd column of R
+        gaze_vector = rmat[:, 2] * radius
+        
+    return gaze_vector, eye_center_cam
+
+def calculate_gaze_intersection(P_L, V_L, P_R, V_R):
+    """
+    计算左右眼视线的交点（或最接近点），以右眼视线为基准。
+    即计算两条异面直线公垂线在右眼视线上的垂足。
+    
+    :param P_L: 左眼位置 (3,)
+    :param V_L: 左眼视线向量 (3,) (normalized)
+    :param P_R: 右眼位置 (3,)
+    :param V_R: 右眼视线向量 (3,) (normalized)
+    :return: intersection_point (3,), is_converging (bool)
+    """
+    # 确保向量归一化
+    V_L = V_L / np.linalg.norm(V_L)
+    V_R = V_R / np.linalg.norm(V_R)
+    
+    # P_L + t * V_L = P_R + s * V_R + (shortest_dist_vec)
+    # 我们想求 s (on right ray) 使得距离最小
+    
+    w0 = P_L - P_R
+    a = np.dot(V_L, V_L) # 1
+    b = np.dot(V_L, V_R)
+    c = np.dot(V_R, V_R) # 1
+    d = np.dot(V_L, w0)
+    e = np.dot(V_R, w0)
+    
+    denom = a * c - b * b
+    
+    if denom < 1e-6:
+        # 平行，无交点。假设看无穷远
+        # 或者设为一个默认距离，比如 1米
+        # 即使平行，也返回一个点供显示
+        return P_R + V_R * 1000.0, False
+
+    # s = (b*d - a*e) / denom
+    s = (b * d - a * e) / denom
+    t = (b * e - c * d) / denom
+    
+    # 宽松的交点判断：
+    # 不再强制要求 s > 0 (在前方) 才能算作交点，因为用户要求"无论是否有交点...持续显示"
+    # 但我们仍然可以通过 is_converging 标记来区分是否合理
+    
+    # 计算公垂线中点作为交点
+    P_on_L = P_L + t * V_L
+    P_on_R = P_R + s * V_R
+    intersection = (P_on_L + P_on_R) / 2.0
+    
+    # 判断是否"合理汇聚" (仅用于UI颜色显示)
+    # 1. 交点在前方一定距离 (s > 50 units = 1cm)
+    # 2. 且公垂线长度(两条射线最近距离)不能太大? (用户说无法完美相交，所以忽略距离)
+    if s > 50.0 and t > 50.0:
+        is_converging = True
+    else:
+        is_converging = False
+        
+    return intersection, is_converging
+    closest_point = t_closest * ray_dir
+    # 强制长度为半径
+    vec = closest_point - eye_center_cam
+    vec_norm = np.linalg.norm(vec)
+    if vec_norm > 0:
+        gaze_vector = vec / vec_norm * radius
+    else:
+        # Fallback to head forward direction (Z-axis of head in camera space)
+        # Head Z-axis in camera space is the 3rd column of R
+        gaze_vector = rmat[:, 2] * radius
+        
+    return gaze_vector, eye_center_cam
 
 # 计算瞳孔间距和距离估算
 def calculate_distance(eye_points, frame_width, frame_height, fov=55):
@@ -499,7 +640,7 @@ class ConfigManager:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     # --- 摄像头数据管理 ---
-    def update_camera(self, device_index, fov=None, name=None, user_configured=False, resolution=None):
+    def update_camera(self, device_index, fov=None, name=None, user_configured=False, resolution=None, exposure=None):
         idx_str = str(device_index)
         if idx_str not in self.cameras_data:
             self.cameras_data[idx_str] = {
@@ -516,6 +657,8 @@ class ConfigManager:
             self.cameras_data[idx_str]["user_configured"] = True
         if resolution is not None:
             self.cameras_data[idx_str]["resolution"] = resolution
+        if exposure is not None:
+            self.cameras_data[idx_str]["exposure"] = exposure
             
         self._save_json(self.cameras_config_path, self.cameras_data)
 
@@ -533,11 +676,12 @@ class ConfigManager:
 
 # --- 视频流获取优化 (Producer) ---
 class WebcamVideoStream:
-    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2):
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0):
         self.src = src
         self.width = width
         self.height = height
         self.api_preference = api_preference
+        self.exposure = exposure
         
         # 初始化摄像头
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
@@ -555,12 +699,12 @@ class WebcamVideoStream:
 
         # 5. 关闭自动曝光、白平衡、增益
         try:
-            self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) 
-            self.stream.set(cv2.CAP_PROP_EXPOSURE, -5.0) 
+            self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) # 0.25 通常对应 'Manual' 模式 (具体取决于后端)
+            self.stream.set(cv2.CAP_PROP_EXPOSURE, self.exposure) 
             self.stream.set(cv2.CAP_PROP_AUTO_WB, 0)
             self.stream.set(cv2.CAP_PROP_WB_TEMPERATURE, 4600)
             self.stream.set(cv2.CAP_PROP_GAIN, 32) 
-            print("尝试关闭自动曝光/白平衡/增益...")
+            print(f"尝试设置曝光为 {self.exposure} (手动模式)...")
         except Exception as e:
             print(f"设置摄像头手动参数失败: {e}")
         
@@ -897,6 +1041,19 @@ if not cap_temp or not cap_temp.isOpened():
 # 注意：select_resolution 会操作 cap_temp 来测试分辨率
 target_w, target_h = select_resolution(cap_temp, camera_index, config_manager)
 
+# 获取已保存的曝光配置，如果没有则使用默认值 -5.0
+camera_info = config_manager.get_camera_info(camera_index)
+exposure_val = -5.0
+if camera_info and "exposure" in camera_info:
+    exposure_val = float(camera_info["exposure"])
+    print(f"检测到已保存的曝光配置: {exposure_val}")
+else:
+    # 也可以选择在这里让用户输入，或者只是使用默认值并保存
+    # 为了方便，这里先只使用默认值，如果用户想改，可以直接改 JSON
+    print(f"使用默认曝光值: {exposure_val}")
+    # 第一次运行时可以保存一下默认值，方便用户后续在 json 中找到并修改
+    config_manager.update_camera(camera_index, exposure=exposure_val)
+
 # 释放临时 cap，准备使用 WebcamVideoStream 接管
 cap_temp.release()
 
@@ -904,7 +1061,7 @@ print(f"正在启动优化视频流 (MJPEG, 独立线程)...")
 print(f"目标分辨率: {target_w}x{target_h}")
 
 # 初始化多线程视频流
-video_stream = WebcamVideoStream(src=camera_index, width=target_w, height=target_h, api_preference=used_api).start()
+video_stream = WebcamVideoStream(src=camera_index, width=target_w, height=target_h, api_preference=used_api, exposure=exposure_val).start()
 
 # 等待摄像头预热
 time.sleep(1.0)
@@ -1036,8 +1193,92 @@ while True:
             
             # 计算头部姿态并校正距离
             # 注意：get_head_pose 使用的是 camera_model 计算出的矩阵
-            pitch, yaw, roll = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
+            pitch, yaw, roll, rvec, tvec = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
             
+            if VISUALIZE and rvec is not None and tvec is not None and current_frame_id % 6 == 0:
+                # --- 新增：眼球视线向量计算 ---
+                # 定义模型空间中的眼球中心 (Left: 33/133, Right: 263/362)
+                # Z轴向头骨内部偏移 12mm (60 units)
+                # Midpoints calculated previously: Left(-157.5, 170, -127.5), Right(157.5, 170, -127.5)
+                # Apply Z offset: -127.5 - 60 = -187.5
+                left_eye_center_model = np.array([-157.5, 170.0, -187.5])
+                right_eye_center_model = np.array([157.5, 170.0, -187.5])
+                
+                # 获取虹膜 2D 坐标 (已在 eye_points 中, eye_points = [(cx_left, cy_left), (cx_right, cy_right)])
+                # 注意：eye_points 是滤波后的，比较稳定，使用它们
+                left_iris_2d = eye_points[0]
+                right_iris_2d = eye_points[1]
+                
+                # 计算左右眼视线
+                l_gaze_vec, l_eye_center_cam = calculate_single_eye_gaze(
+                    left_iris_2d, left_eye_center_model, rvec, tvec, cam_matrix, dist_coeffs
+                )
+                r_gaze_vec, r_eye_center_cam = calculate_single_eye_gaze(
+                    right_iris_2d, right_eye_center_model, rvec, tvec, cam_matrix, dist_coeffs
+                )
+                
+                # --- 计算视线交点并校正左眼 ---
+                intersection_point, is_converging = calculate_gaze_intersection(
+                    l_eye_center_cam, l_gaze_vec,
+                    r_eye_center_cam, r_gaze_vec
+                )
+                
+                # 标准化左眼视线向量：使其指向交点（或最接近点）
+                # 用户要求：取消左眼视线方向的标准化，将两条射线的最近交点视为交点。
+                # Left Gaze = Intersection - Left Eye (REMOVED as per user request)
+                # new_l_gaze = intersection_point - l_eye_center_cam
+                # new_l_gaze_norm = np.linalg.norm(new_l_gaze)
+                # if new_l_gaze_norm > 0:
+                #    l_gaze_vec = (new_l_gaze / new_l_gaze_norm) * 60.0
+
+                # --- 绘制视线 ---
+                axis_length = 500.0 # Scale for visualization
+                
+                # 投影左眼 (使用校正后的向量)
+                l_start_3d = l_eye_center_cam
+                l_end_3d = l_eye_center_cam + l_gaze_vec * (axis_length / 60.0) # Normalize by radius (60)
+                
+                # 投影右眼 (保持原样)
+                r_start_3d = r_eye_center_cam
+                r_end_3d = r_eye_center_cam + r_gaze_vec * (axis_length / 60.0)
+                
+                # 投影交点
+                # Intersection point is in Camera Space.
+                
+                points_to_project = np.array([l_start_3d, l_end_3d, r_start_3d, r_end_3d, intersection_point])
+                projected_points, _ = cv2.projectPoints(points_to_project, np.zeros((3,1)), np.zeros((3,1)), cam_matrix, dist_coeffs)
+                
+                p_l_start = (int(projected_points[0][0][0]), int(projected_points[0][0][1]))
+                p_l_end = (int(projected_points[1][0][0]), int(projected_points[1][0][1]))
+                p_r_start = (int(projected_points[2][0][0]), int(projected_points[2][0][1]))
+                p_r_end = (int(projected_points[3][0][0]), int(projected_points[3][0][1]))
+                p_intersect = (int(projected_points[4][0][0]), int(projected_points[4][0][1]))
+                
+                cv2.line(frame, p_l_start, p_l_end, (255, 0, 0), 2)
+                cv2.line(frame, p_r_start, p_r_end, (255, 0, 0), 2)
+                
+                # 绘制眼球中心 (黄色小点)
+                cv2.circle(frame, p_l_start, 3, (0, 255, 255), -1)
+                cv2.circle(frame, p_r_start, 3, (0, 255, 255), -1)
+                
+                # 绘制交点 (紫色)
+                # if is_converging:
+                #    cv2.circle(frame, p_intersect, 5, (255, 0, 255), -1)
+                
+                # 恒显示交点坐标文本
+                # Camera Space: X (Right), Y (Down), Z (Forward)
+                # User asked for X (Horizontal offset), Y (Vertical offset) relative to optical axis
+                # Optical axis is Z-axis (X=0, Y=0). So we just display X and Y of intersection.
+                # Convert units: 50 units = 1cm. 
+                ix_cm = intersection_point[0] / 50.0
+                iy_cm = intersection_point[1] / 50.0
+                iz_cm = intersection_point[2] / 50.0
+                
+                inter_text = f"Gaze Target: X:{ix_cm:.1f} Y:{iy_cm:.1f} Z:{iz_cm:.1f} cm"
+                text_color = (255, 0, 255) if is_converging else (0, 0, 255) # Purple if good, Red if diverging
+                cv2.putText(frame, inter_text, (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+
+
             # 三角变换校正
             correction_factor = math.cos(math.radians(yaw))
             if correction_factor < 0.2: correction_factor = 0.2
