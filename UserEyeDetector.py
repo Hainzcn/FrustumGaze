@@ -8,7 +8,6 @@ import time
 import socket
 import threading
 import queue
-# from scipy.interpolate import CubicSpline
 
 # 全局变量用于线程间通信
 VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计算和 UDP 发送
@@ -16,19 +15,19 @@ latest_data = None
 data_lock = threading.Lock()
 stop_event = threading.Event()
 
-# UDP socket (initialized in main)
+# UDP 套接字 (在主函数中初始化)
 sock = None
 
-# --- Camera Model ---
+# --- 相机模型 ---
 class CameraModel:
     def __init__(self, frame_w, frame_h, fov_deg=60.0):
         self.frame_w = frame_w
         self.frame_h = frame_h
         self.fov = fov_deg
         
-        # Calculate intrinsics once
+        # 一次性计算内参
         self.fov_rad = math.radians(self.fov)
-        # Assuming square pixels and principal point at center
+        # 假设像素为正方形且主点位于中心
         self.focal_length = (self.frame_w / 2) / math.tan(self.fov_rad / 2)
         self.cx = self.frame_w / 2.0
         self.cy = self.frame_h / 2.0
@@ -40,7 +39,7 @@ class CameraModel:
         ], dtype="double")
         self.dist_coeffs = np.zeros((4, 1))
 
-# --- 1€ Filter Implementation for Stability & Responsiveness ---
+# --- 1€ 滤波器实现 (用于稳定性和响应性) ---
 class OneEuroFilter:
     def __init__(self, t0, x0, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
         """
@@ -94,9 +93,9 @@ class OneDKalmanFilter:
         self.kf = cv2.KalmanFilter(2, 1)
         self.kf.measurementMatrix = np.array([[1, 0]], np.float32)
         self.kf.transitionMatrix = np.array([[1, 1], [0, 1]], np.float32)
-        # Process noise covariance (Q) - prediction uncertainty
+        # 过程噪声协方差 (Q) - 预测不确定性
         self.kf.processNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * Q
-        # Measurement noise covariance (R) - measurement uncertainty
+        # 测量噪声协方差 (R) - 测量不确定性
         self.kf.measurementNoiseCov = np.array([[1]], np.float32) * R
         self.kf.statePost = np.array([[0], [0]], np.float32)
         self.first_run = True
@@ -117,17 +116,17 @@ class EyeTracker:
         self.current_offset_x = 0
         self.current_offset_y = 0
         
-        # Initialize Kalman filters for distance smoothing (Secondary Layer)
+        # 初始化距离平滑卡尔曼滤波器（二级层）
         self.pixel_dist_filter = OneDKalmanFilter(Q=0.1, R=5.0)
         self.real_dist_filter = OneDKalmanFilter(Q=0.1, R=5.0)
-        # Filters for offset (Secondary Layer)
+        # 偏移量滤波器（二级层）
         self.offset_x_filter = OneDKalmanFilter(Q=0.1, R=0.1)
         self.offset_y_filter = OneDKalmanFilter(Q=0.1, R=0.1)
         
         # 记录主视眼位置用于绘制
         self.dominant_eye_pos = None
 
-        # --- Pixel Level Filters (Primary Layer) ---
+        # --- 像素级滤波器 (一级层) ---
         # 使用 OneEuroFilter 在源头消除抖动
         # 参数调整建议：min_cutoff 越小越稳，beta 越大越快
         self.filters_initialized = False
@@ -139,7 +138,7 @@ class EyeTracker:
     def reset(self):
         self.dominant_eye_pos = None
         self.filters_initialized = False
-        # Keep current distance values until new ones are calculated to avoid flickering
+        # 保持当前距离值直到计算出新值以避免闪烁
     
     def filter_eye_points(self, eye_points):
         """
@@ -232,10 +231,6 @@ class EyeTracker:
         real_offset_x = Z * (u - cx) / fx
         real_offset_y = Z * (v - cy) / fy
         
-        # 调试打印
-        scale_factor = Z / fx if fx != 0 else 0
-        # print(f"px_offset_x: {u - cx:.2f}, px_offset_y: {v - cy:.2f}, Scale: {scale_factor:.4f} cm/px")
-        
         # 滤波 (Keep Secondary Filter)
         filtered_x = self.offset_x_filter.update(real_offset_x)
         filtered_y = self.offset_y_filter.update(real_offset_y)
@@ -247,21 +242,21 @@ class EyeTracker:
 class ImagePreprocessor:
     def __init__(self):
         self.last_roi = None # (x, y, w, h)
-        self.alpha = 0.7 # ROI smoothing factor (0-1)
+        self.alpha = 0.7 # ROI 平滑因子 (0-1)
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 
     def process(self, frame, last_landmarks=None):
         """
-        Preprocessing: ROI Crop -> Upscale -> Bilateral Filter -> Contrast Enhancement
-        Returns: processed_frame, roi_info (x, y, w, h, scale)
+        预处理：ROI 裁剪 -> 放大 -> 双边滤波 -> 对比度增强
+        返回：processed_frame, roi_info (x, y, w, h, scale)
         """
         h_frame, w_frame = frame.shape[:2]
         
-        # 1. Compute ROI
+        # 1. 计算 ROI
         roi = self._compute_roi(w_frame, h_frame, last_landmarks)
         x, y, w, h = roi
         
-        # Crop
+        # 裁剪
         if w <= 0 or h <= 0:
             return frame, (0, 0, w_frame, h_frame, 1.0)
             
@@ -270,7 +265,7 @@ class ImagePreprocessor:
         if crop.size == 0:
             return frame, (0, 0, w_frame, h_frame, 1.0)
 
-        # 2. Pixel Alignment / Cubic Interpolation Upscaling
+        # 2. 像素对齐 / 三次插值放大
         scale_factor = 1.0
         target_min_size = 256
         min_dim = min(w, h)
@@ -281,10 +276,10 @@ class ImagePreprocessor:
             new_h = int(h * scale_factor)
             crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
-        # 3. Bilateral Filter (Edge-preserving smoothing)
-        # crop = cv2.bilateralFilter(crop, d=5, sigmaColor=75, sigmaSpace=75)
+        # 3. 双边滤波 (边缘保留平滑)
+        # (已移除注释代码)
         
-        # 4. Contrast Enhancement (CLAHE on L channel)
+        # 4. 对比度增强 (L 通道 CLAHE)
         lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         l2 = self.clahe.apply(l)
@@ -295,33 +290,33 @@ class ImagePreprocessor:
 
     def _compute_roi(self, w_frame, h_frame, landmarks):
         if landmarks is None:
-            # Lost target or initial state: Smoothly reset to full frame
+            # 丢失目标或初始状态：平滑重置为全帧
             target_roi = (0, 0, w_frame, h_frame)
         else:
-            # Compute bounding box
+            # 计算边界框
             xs = [p.x for p in landmarks]
             ys = [p.y for p in landmarks]
             
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
             
-            # Convert to pixel coordinates (center and dimensions)
+            # 转换为像素坐标 (中心和尺寸)
             cx = (min_x + max_x) / 2 * w_frame
             cy = (min_y + max_y) / 2 * h_frame
             fw = (max_x - min_x) * w_frame
             fh = (max_y - min_y) * h_frame
             
-            # Expand range (Padding)
+            # 扩展范围 (填充)
             padding = 2.0 
             size = max(fw, fh) * padding
             
-            # Calculate top-left
+            # 计算左上角
             x = int(cx - size / 2)
             y = int(cy - size / 2)
             w = int(size)
             h = int(size)
             
-            # Boundary checks
+            # 边界检查
             x = max(0, x)
             y = max(0, y)
             w = min(w, w_frame - x)
@@ -329,7 +324,7 @@ class ImagePreprocessor:
             
             target_roi = (x, y, w, h)
 
-        # Smooth ROI changes
+        # 平滑 ROI 变化
         if self.last_roi is None:
             self.last_roi = target_roi
             return target_roi
@@ -337,7 +332,7 @@ class ImagePreprocessor:
         lx, ly, lw, lh = self.last_roi
         tx, ty, tw, th = target_roi
         
-        # Faster reset if target lost
+        # 如果目标丢失则更快重置
         alpha = self.alpha if landmarks is not None else 0.5
         
         nx = int(lx * alpha + tx * (1 - alpha))
@@ -345,7 +340,7 @@ class ImagePreprocessor:
         nw = int(lw * alpha + tw * (1 - alpha))
         nh = int(lh * alpha + th * (1 - alpha))
         
-        # Boundary safety check
+        # 边界安全检查
         nx = max(0, nx)
         ny = max(0, ny)
         nw = min(nw, w_frame - nx)
@@ -355,22 +350,22 @@ class ImagePreprocessor:
         return self.last_roi
 
     def restore_landmarks(self, detection_result, roi_info, w_frame, h_frame):
-        """Restore normalized local coordinates to normalized global coordinates"""
+        """将归一化局部坐标还原为归一化全局坐标"""
         if not detection_result.face_landmarks:
             return
 
         roi_x, roi_y, roi_w, roi_h, scale = roi_info
         
-        # If full frame and no scale, no processing needed
+        # 如果是全帧且无缩放，则无需处理
         if roi_x == 0 and roi_y == 0 and roi_w == w_frame and roi_h == h_frame and scale == 1.0:
             return
 
         for face_landmarks in detection_result.face_landmarks:
             for p in face_landmarks:
-                # Convert back to global normalized coordinates
-                # p.x is normalized in the cropped image
-                # roi_w is the width of the crop in the original image
-                # roi_x is the x offset in the original image
+                # 转换回全局归一化坐标
+                # p.x 在裁剪图像中归一化
+                # roi_w 是原始图像中裁剪区域的宽度
+                # roi_x 是原始图像中的 x 偏移量
                 
                 new_x = (p.x * roi_w + roi_x) / w_frame
                 new_y = (p.y * roi_h + roi_y) / h_frame
@@ -452,18 +447,18 @@ def calculate_single_eye_gaze(iris_center_2d, eye_center_model_3d, rvec, tvec, c
     eye_center_cam = np.dot(rmat, eye_center_model_3d) + tvec.reshape(3)
     
     # 2. 将虹膜 2D 点反投影为射线 (相机坐标系)
-    # Undistort points first? Assuming small distortion or raw coordinates for simplicity
-    # Ray direction: inv(K) * [u, v, 1]
+    # 先去畸变？为简单起见假设畸变很小或直接使用原始坐标
+    # 射线方向: inv(K) * [u, v, 1]
     p_iris_h = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
     ray_dir = np.dot(np.linalg.inv(cam_matrix), p_iris_h)
     ray_dir = ray_dir / np.linalg.norm(ray_dir) # Normalize
     
     # 3. 计算射线与眼球球面的交点 (或者近似)
-    # Sphere: Center = eye_center_cam, Radius = 60 (12mm * 50 units/cm)
+    # 球体：圆心 = eye_center_cam，半径 = 60 (12mm * 50 units/cm)
     radius = 60.0
     
-    # Ray: O = (0,0,0), D = ray_dir
-    # Intersection: |t*D - C|^2 = r^2
+    # 射线: O = (0,0,0), D = ray_dir
+    # 交点: |t*D - C|^2 = r^2
     # t^2 - 2(C.D)t + |C|^2 - r^2 = 0
     C = eye_center_cam
     a = 1.0
@@ -473,7 +468,7 @@ def calculate_single_eye_gaze(iris_center_2d, eye_center_model_3d, rvec, tvec, c
     discriminant = b**2 - 4*a*c_val
     
     if discriminant >= 0:
-        # Ray intersects sphere
+        # 射线与球体相交
         t1 = (-b - math.sqrt(discriminant)) / (2*a)
         t2 = (-b + math.sqrt(discriminant)) / (2*a)
         t = min(t1, t2) if t1 > 0 and t2 > 0 else max(t1, t2) # Should be positive
@@ -484,7 +479,7 @@ def calculate_single_eye_gaze(iris_center_2d, eye_center_model_3d, rvec, tvec, c
             return gaze_vector, eye_center_cam
             
     # Fallback: 如果没有交点（计算误差），使用射线上的最近点
-    # Closest point on ray to C is at t = C.D
+    # 射线上距离 C 最近的点在 t = C.D 处
     t_closest = np.dot(C, ray_dir)
     closest_point = t_closest * ray_dir
     # 强制长度为半径
@@ -493,79 +488,52 @@ def calculate_single_eye_gaze(iris_center_2d, eye_center_model_3d, rvec, tvec, c
     if vec_norm > 0:
         gaze_vector = vec / vec_norm * radius
     else:
-        # Fallback to head forward direction (Z-axis of head in camera space)
-        # Head Z-axis in camera space is the 3rd column of R
+        # 回退到头部前方方向 (相机空间中的头部 Z 轴)
+        # 相机空间中的头部 Z 轴是 R 的第 3 列
         gaze_vector = rmat[:, 2] * radius
         
     return gaze_vector, eye_center_cam
 
-def calculate_gaze_intersection(P_L, V_L, P_R, V_R):
+def calculate_screen_intersection(eye_pos, gaze_vec, z_plane=0.0):
     """
-    计算左右眼视线的交点（或最接近点），以右眼视线为基准。
-    即计算两条异面直线公垂线在右眼视线上的垂足。
-    
-    :param P_L: 左眼位置 (3,)
-    :param V_L: 左眼视线向量 (3,) (normalized)
-    :param P_R: 右眼位置 (3,)
-    :param V_R: 右眼视线向量 (3,) (normalized)
-    :return: intersection_point (3,), is_converging (bool)
+    计算视线与屏幕平面 (Z=0) 的交点
+    :param eye_pos: 眼球中心/起点 (x, y, z)
+    :param gaze_vec: 视线向量 (x, y, z)
+    :param z_plane: 屏幕平面的 Z 坐标 (默认为 0)
+    :return: intersection_point (x, y, 0) or None
     """
-    # 确保向量归一化
-    V_L = V_L / np.linalg.norm(V_L)
-    V_R = V_R / np.linalg.norm(V_R)
+    # 视线必须指向屏幕 (Z 减小的方向)
+    if gaze_vec[2] >= 0:
+        return None
+        
+    # P = O + t * D
+    # P.z = O.z + t * D.z = z_plane
+    # t = (z_plane - O.z) / D.z
     
-    # P_L + t * V_L = P_R + s * V_R + (shortest_dist_vec)
-    # 我们想求 s (on right ray) 使得距离最小
+    t = (z_plane - eye_pos[2]) / gaze_vec[2]
     
-    w0 = P_L - P_R
-    a = np.dot(V_L, V_L) # 1
-    b = np.dot(V_L, V_R)
-    c = np.dot(V_R, V_R) # 1
-    d = np.dot(V_L, w0)
-    e = np.dot(V_R, w0)
-    
-    denom = a * c - b * b
-    
-    if denom < 1e-6:
-        # 平行，无交点。假设看无穷远
-        # 或者设为一个默认距离，比如 1米
-        # 即使平行，也返回一个点供显示
-        return P_R + V_R * 1000.0, False
+    if t < 0:
+        return None # 交点在背后
+        
+    intersection = eye_pos + t * gaze_vec
+    return intersection
 
-    # s = (b*d - a*e) / denom
-    s = (b * d - a * e) / denom
-    t = (b * e - c * d) / denom
-    
-    # 宽松的交点判断：
-    # 不再强制要求 s > 0 (在前方) 才能算作交点，因为用户要求"无论是否有交点...持续显示"
-    # 但我们仍然可以通过 is_converging 标记来区分是否合理
-    
-    # 计算公垂线中点作为交点
-    P_on_L = P_L + t * V_L
-    P_on_R = P_R + s * V_R
-    intersection = (P_on_L + P_on_R) / 2.0
-    
-    # 判断是否"合理汇聚" (仅用于UI颜色显示)
-    # 1. 交点在前方一定距离 (s > 50 units = 1cm)
-    # 2. 且公垂线长度(两条射线最近距离)不能太大? (用户说无法完美相交，所以忽略距离)
-    if s > 50.0 and t > 50.0:
-        is_converging = True
-    else:
-        is_converging = False
+def calculate_weighted_average(p1, p2, w1=0.5, w2=0.5):
+    """
+    计算两个点的加权平均
+    """
+    if p1 is None and p2 is None:
+        return None
+    if p1 is None:
+        return p2
+    if p2 is None:
+        return p1
         
-    return intersection, is_converging
-    closest_point = t_closest * ray_dir
-    # 强制长度为半径
-    vec = closest_point - eye_center_cam
-    vec_norm = np.linalg.norm(vec)
-    if vec_norm > 0:
-        gaze_vector = vec / vec_norm * radius
-    else:
-        # Fallback to head forward direction (Z-axis of head in camera space)
-        # Head Z-axis in camera space is the 3rd column of R
-        gaze_vector = rmat[:, 2] * radius
+    total_w = w1 + w2
+    if total_w <= 0:
+        return (p1 + p2) / 2.0
         
-    return gaze_vector, eye_center_cam
+    return (p1 * w1 + p2 * w2) / total_w
 
 # 计算瞳孔间距和距离估算
 def calculate_distance(eye_points, frame_width, frame_height, fov=55):
@@ -596,7 +564,7 @@ tracker = EyeTracker()
 preprocessor = ImagePreprocessor()
 last_landmarks_norm = None
 
-# Initialize MediaPipe Face Landmarker
+# 初始化 MediaPipe 人脸地标检测器
 base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
 options = vision.FaceLandmarkerOptions(
     base_options=base_options,
@@ -1075,31 +1043,30 @@ print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
 if int(actual_w) != target_w or int(actual_h) != target_h:
     print(f"警告: 实际分辨率 ({int(actual_w)}x{int(actual_h)}) 与请求分辨率 ({target_w}x{target_h}) 不一致。")
 
-# Camera Model Initialization (Intrinsics Pre-calculation)
+# 相机模型初始化 (一次性计算内参)
 camera_model = CameraModel(actual_w, actual_h, camera_fov)
 cam_matrix = camera_model.cam_matrix
 dist_coeffs = camera_model.dist_coeffs
 
-# MediaPipe Iris Indices
+# MediaPipe 虹膜索引
 LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
-# UDP Configuration
+# UDP 配置
 UDP_IP = "127.0.0.1"
 UDP_PORT = 8888
 
-# Initialize UDP Socket
+# 初始化 UDP 套接字
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# sock.setblocking(False) # Removed non-blocking mode to ensure data sending
 print(f"UDP socket initialized. Target: {UDP_IP}:{UDP_PORT}")
 
-# --- Pipeline Initialization ---
-# Queue for processed results (Process -> Main)
-# Main loop will consume this
+# --- 管道初始化 ---
+# 处理结果队列 (处理 -> 主线程)
+# 主循环将消费此队列
 processed_queue = queue.Queue(maxsize=2)
 
-# Start Processing Thread
-# video_stream.frame_queue is the input
+# 启动处理线程
+# video_stream.frame_queue 作为输入
 processing_thread = FrameProcessorThread(
     video_stream.frame_queue, 
     processed_queue, 
@@ -1116,13 +1083,21 @@ prev_frame_time = 0
 new_frame_time = 0
 last_processed_frame_id = -1
 
+# 初始化可视化缓存数据 (用于消除闪烁)
+cached_viz_data = {
+    'l_start': None, 'l_end': None, 
+    'r_start': None, 'r_end': None,
+    'text': None, 'text_color': (255, 0, 255),
+    'l_eye_center': None, 'r_eye_center': None
+}
+
 while True:
     # 从处理线程获取结果
     try:
-        # Timeout 1ms to allow UI updates even if no new frame
+        # 超时 1ms 以允许 UI 更新，即使没有新帧
         result_data = processed_queue.get(timeout=0.001)
     except queue.Empty:
-        # Check if user pressed ESC in opencv window (needs waitKey to process events)
+        # 检查用户是否在 opencv 窗口中按下了 ESC (需要 waitKey 来处理事件)
         if VISUALIZE:
             if cv2.waitKey(1) & 0xFF == 27:
                 break
@@ -1160,8 +1135,8 @@ while True:
     if detection_result.face_landmarks:
         for face_landmarks in detection_result.face_landmarks:
             # 获取左右虹膜中心
-            # Mesh point 468 is Left Iris Center (User's Left)
-            # Mesh point 473 is Right Iris Center (User's Right)
+            # 网格点 468 是左虹膜中心 (用户左侧)
+            # 网格点 473 是右虹膜中心 (用户右侧)
             
             pt_left_iris = face_landmarks[468]
             pt_right_iris = face_landmarks[473]
@@ -1199,13 +1174,10 @@ while True:
                 # --- 新增：眼球视线向量计算 ---
                 # 定义模型空间中的眼球中心 (Left: 33/133, Right: 263/362)
                 # Z轴向头骨内部偏移 12mm (60 units)
-                # Midpoints calculated previously: Left(-157.5, 170, -127.5), Right(157.5, 170, -127.5)
-                # Apply Z offset: -127.5 - 60 = -187.5
                 left_eye_center_model = np.array([-157.5, 170.0, -187.5])
                 right_eye_center_model = np.array([157.5, 170.0, -187.5])
                 
                 # 获取虹膜 2D 坐标 (已在 eye_points 中, eye_points = [(cx_left, cy_left), (cx_right, cy_right)])
-                # 注意：eye_points 是滤波后的，比较稳定，使用它们
                 left_iris_2d = eye_points[0]
                 right_iris_2d = eye_points[1]
                 
@@ -1217,66 +1189,48 @@ while True:
                     right_iris_2d, right_eye_center_model, rvec, tvec, cam_matrix, dist_coeffs
                 )
                 
-                # --- 计算视线交点并校正左眼 ---
-                intersection_point, is_converging = calculate_gaze_intersection(
-                    l_eye_center_cam, l_gaze_vec,
-                    r_eye_center_cam, r_gaze_vec
-                )
+                # --- 计算视线与屏幕平面 (Z=0) 的交点 ---
+                l_screen_point = calculate_screen_intersection(l_eye_center_cam, l_gaze_vec)
+                r_screen_point = calculate_screen_intersection(r_eye_center_cam, r_gaze_vec)
                 
-                # 标准化左眼视线向量：使其指向交点（或最接近点）
-                # 用户要求：取消左眼视线方向的标准化，将两条射线的最近交点视为交点。
-                # Left Gaze = Intersection - Left Eye (REMOVED as per user request)
-                # new_l_gaze = intersection_point - l_eye_center_cam
-                # new_l_gaze_norm = np.linalg.norm(new_l_gaze)
-                # if new_l_gaze_norm > 0:
-                #    l_gaze_vec = (new_l_gaze / new_l_gaze_norm) * 60.0
-
-                # --- 绘制视线 ---
-                axis_length = 500.0 # Scale for visualization
+                # --- 加权平均 ---
+                # 暂时使用 0.5/0.5 权重
+                avg_screen_point = calculate_weighted_average(l_screen_point, r_screen_point)
                 
-                # 投影左眼 (使用校正后的向量)
-                l_start_3d = l_eye_center_cam
-                l_end_3d = l_eye_center_cam + l_gaze_vec * (axis_length / 60.0) # Normalize by radius (60)
+                # --- 准备绘制数据 (存入缓存) ---
+                axis_length = 500.0 # 可视化长度
                 
-                # 投影右眼 (保持原样)
-                r_start_3d = r_eye_center_cam
+                # 调整：视线起点改为虹膜位置 (眼球表面)
+                l_start_3d = l_eye_center_cam + l_gaze_vec
+                r_start_3d = r_eye_center_cam + r_gaze_vec
+                
+                # 终点从虹膜再延伸
+                l_end_3d = l_eye_center_cam + l_gaze_vec * (axis_length / 60.0)
                 r_end_3d = r_eye_center_cam + r_gaze_vec * (axis_length / 60.0)
                 
-                # 投影交点
-                # Intersection point is in Camera Space.
-                
-                points_to_project = np.array([l_start_3d, l_end_3d, r_start_3d, r_end_3d, intersection_point])
+                # 投影关键点
+                # 注意：屏幕交点 (Z=0) 无法通过 projectPoints 投影到相机图像上（因为相机就在Z=0）
+                # 所以我们只投影视线向量，而不投影交点
+                points_to_project = np.array([l_start_3d, l_end_3d, r_start_3d, r_end_3d])
                 projected_points, _ = cv2.projectPoints(points_to_project, np.zeros((3,1)), np.zeros((3,1)), cam_matrix, dist_coeffs)
                 
-                p_l_start = (int(projected_points[0][0][0]), int(projected_points[0][0][1]))
-                p_l_end = (int(projected_points[1][0][0]), int(projected_points[1][0][1]))
-                p_r_start = (int(projected_points[2][0][0]), int(projected_points[2][0][1]))
-                p_r_end = (int(projected_points[3][0][0]), int(projected_points[3][0][1]))
-                p_intersect = (int(projected_points[4][0][0]), int(projected_points[4][0][1]))
+                # 更新缓存
+                cached_viz_data['l_start'] = (int(projected_points[0][0][0]), int(projected_points[0][0][1]))
+                cached_viz_data['l_end'] = (int(projected_points[1][0][0]), int(projected_points[1][0][1]))
+                cached_viz_data['r_start'] = (int(projected_points[2][0][0]), int(projected_points[2][0][1]))
+                cached_viz_data['r_end'] = (int(projected_points[3][0][0]), int(projected_points[3][0][1]))
                 
-                cv2.line(frame, p_l_start, p_l_end, (255, 0, 0), 2)
-                cv2.line(frame, p_r_start, p_r_end, (255, 0, 0), 2)
-                
-                # 绘制眼球中心 (黄色小点)
-                cv2.circle(frame, p_l_start, 3, (0, 255, 255), -1)
-                cv2.circle(frame, p_r_start, 3, (0, 255, 255), -1)
-                
-                # 绘制交点 (紫色)
-                # if is_converging:
-                #    cv2.circle(frame, p_intersect, 5, (255, 0, 255), -1)
-                
-                # 恒显示交点坐标文本
-                # Camera Space: X (Right), Y (Down), Z (Forward)
-                # User asked for X (Horizontal offset), Y (Vertical offset) relative to optical axis
-                # Optical axis is Z-axis (X=0, Y=0). So we just display X and Y of intersection.
-                # Convert units: 50 units = 1cm. 
-                ix_cm = intersection_point[0] / 50.0
-                iy_cm = intersection_point[1] / 50.0
-                iz_cm = intersection_point[2] / 50.0
-                
-                inter_text = f"Gaze Target: X:{ix_cm:.1f} Y:{iy_cm:.1f} Z:{iz_cm:.1f} cm"
-                text_color = (255, 0, 255) if is_converging else (0, 0, 255) # Purple if good, Red if diverging
-                cv2.putText(frame, inter_text, (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+                # 更新交点文本缓存
+                if avg_screen_point is not None:
+                    ix_cm = avg_screen_point[0] / 50.0
+                    iy_cm = avg_screen_point[1] / 50.0
+                    # Z is always 0
+                    
+                    cached_viz_data['text'] = f"Gaze on Screen: X:{int(ix_cm)} Y:{int(iy_cm)} cm"
+                    cached_viz_data['text_color'] = (255, 0, 255)
+                else:
+                    cached_viz_data['text'] = "Gaze on Screen: N/A"
+                    cached_viz_data['text_color'] = (0, 0, 255)
 
 
             # 三角变换校正
@@ -1293,7 +1247,7 @@ while True:
             # 更新偏移量 (使用滤波后的坐标和距离)
             tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
 
-            # Direct UDP Send
+            # 直接 UDP 发送
             try:
                 # 格式: "distance,offset_x,offset_y"
                 # 匹配 Unity 端 DataManager.cs 的 ParseAndSetData 解析逻辑 (CSV格式)
@@ -1308,13 +1262,25 @@ while True:
     if VISUALIZE:
         # --- 绘制信息 ---
         
+        # 绘制视线向量和交点信息 (使用缓存的数据，消除闪烁)
+        if cached_viz_data['text'] is not None:
+            # 绘制视线向量
+            if cached_viz_data['l_start'] is not None:
+                cv2.line(frame, cached_viz_data['l_start'], cached_viz_data['l_end'], (255, 0, 0), 2)
+                cv2.line(frame, cached_viz_data['r_start'], cached_viz_data['r_end'], (255, 0, 0), 2)
+
+            # 绘制交点文本
+            cv2.putText(frame, cached_viz_data['text'], (10, 85), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, cached_viz_data['text_color'], 2)
+
         # 绘制光轴中心（十字准星）
         center_x, center_y = w // 2, h // 2
         cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
         cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
 
         # 绘制 FPS (左上角第一行)
-        cv2.putText(frame, f"FPS: {int(fps)}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        pd_display = f" | PD: {int(tracker.current_pixel_dist)}px" if tracker.current_pixel_dist > 0 else ""
+        cv2.putText(frame, f"FPS: {int(fps)}{pd_display}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         # 绘制主视眼标记（黄色圆圈 + 'R'）
         if tracker.dominant_eye_pos is not None and detection_result.face_landmarks:
@@ -1328,10 +1294,10 @@ while True:
                 info_text = "too far!"
                 cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             else:
-                info_text = f"Dist: {int(tracker.current_estimated_dist)}cm | PD: {int(tracker.current_pixel_dist)}px"
-                offset_text = f"Offset X: {int(tracker.current_offset_x):+d}cm | Y: {int(tracker.current_offset_y):+d}cm"
-                cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                cv2.putText(frame, offset_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                # 重构为空间坐标显示
+                # 参考系：原点摄像头，Z光轴，X水平，Y竖直
+                head_pos_text = f"Head Pos: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
+                cv2.putText(frame, head_pos_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 
                 # 绘制瞳孔间距线 (使用滤波后的点)
                 if len(eye_points) >= 2:
