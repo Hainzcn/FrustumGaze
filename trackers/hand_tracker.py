@@ -75,8 +75,18 @@ class HandProcessorProcess(multiprocessing.Process):
                 # 从共享内存复制图像数据
                 frame = shm_array.copy()
                 
-                # 转换处理后的帧为 RGB
+                # 降分辨率处理：自适应帧宽高比，将高度降到360像素
+                h, w = frame.shape[:2]
+                target_h = 360
+                scale = target_h / float(h)
+                target_w = int(w * scale)
+                
+                # 转换处理后的帧为 RGB，并进行缩放
+                # 注意：MediaPipe 使用归一化坐标，所以不需要手动映射回原始分辨率
+                # 除非需要像素坐标，但我们这里直接传递归一化坐标给主进程
                 processed_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                processed_rgb = cv2.resize(processed_rgb, (target_w, target_h))
+                
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
                 
                 timestamp_ms = int(time.time() * 1000)

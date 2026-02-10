@@ -138,6 +138,7 @@ def main():
     # 本地持有的当前帧副本，用于显示（因为子进程不回传图像）
     current_display_frame = None
     latest_hand_result = None
+    hand_frame_counter = 0
 
     try:
         while True:
@@ -168,17 +169,19 @@ def main():
                     except queue.Full:
                         pass
 
-                    # 同样通知手部追踪进程
-                    if hand_input_queue.full():
+                    # 同样通知手部追踪进程 (每3帧发送一次)
+                    hand_frame_counter += 1
+                    if hand_frame_counter % 3 == 0:
+                        if hand_input_queue.full():
+                            try:
+                                hand_input_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                        
                         try:
-                            hand_input_queue.get_nowait()
-                        except queue.Empty:
+                            hand_input_queue.put({'frame_id': frame_id}, block=False)
+                        except queue.Full:
                             pass
-                    
-                    try:
-                        hand_input_queue.put({'frame_id': frame_id}, block=False)
-                    except queue.Full:
-                        pass
 
             # 检查是否有手部追踪结果
             try:
