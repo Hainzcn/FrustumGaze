@@ -1,6 +1,7 @@
 
 import cv2
 import numpy as np
+# import mediapipe as mp # 移除 mediapipe 导入，避免 AttributeError
 from config.settings import LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH
 from utils.math_utils import calculate_single_eye_gaze, calculate_screen_intersection, calculate_weighted_average
 
@@ -13,15 +14,28 @@ class Visualizer:
             'text': None, 'text_color': (255, 0, 255),
             'l_eye_center': None, 'r_eye_center': None
         }
+        # 定义手部连接关系
+        self.HAND_CONNECTIONS = [
+            (0, 1), (1, 2), (2, 3), (3, 4),
+            (0, 5), (5, 6), (6, 7), (7, 8),
+            (5, 9), (9, 10), (10, 11), (11, 12),
+            (9, 13), (13, 14), (14, 15), (15, 16),
+            (13, 17), (17, 18), (18, 19), (19, 20),
+            (0, 17)
+        ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None):
         """
         统一渲染入口
         """
         # 1. 绘制 ROI
         self._draw_roi(frame, roi_info)
 
-        # 2. 绘制虹膜
+        # 2. 绘制手部关键点
+        if hand_result:
+            self.draw_hands(frame, hand_result)
+
+        # 3. 绘制虹膜
         if eye_points and len(eye_points) == 2:
             self._draw_iris(frame, eye_points, raw_eye_points)
             
@@ -46,6 +60,37 @@ class Visualizer:
         # 5. 显示并处理按键
         cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
         return cv2.waitKey(1) & 0xFF == 27 # Returns True if ESC pressed
+
+    def draw_hands(self, frame, hand_result):
+        """
+        绘制手部关键点
+        """
+        if not hand_result or not hand_result.multi_hand_landmarks:
+            return
+
+        h, w, _ = frame.shape
+        
+        for hand_landmarks_lite in hand_result.multi_hand_landmarks:
+             # Draw connections
+            for connection in self.HAND_CONNECTIONS:
+                start_idx = connection[0]
+                end_idx = connection[1]
+                
+                # 确保索引不越界
+                if start_idx < len(hand_landmarks_lite) and end_idx < len(hand_landmarks_lite):
+                    start_point = hand_landmarks_lite[start_idx]
+                    end_point = hand_landmarks_lite[end_idx]
+                    
+                    x1, y1 = int(start_point.x * w), int(start_point.y * h)
+                    x2, y2 = int(end_point.x * w), int(end_point.y * h)
+                    
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
+            # Draw landmarks
+            for landmark in hand_landmarks_lite:
+                x, y = int(landmark.x * w), int(landmark.y * h)
+                cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
+                cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
 
     def _draw_roi(self, frame, roi_info):
          h, w = frame.shape[:2]

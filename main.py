@@ -16,6 +16,7 @@ from utils.image_utils import ImagePreprocessor
 from utils.math_utils import get_head_pose, calculate_distance, calculate_single_eye_gaze, calculate_screen_intersection, calculate_weighted_average
 from trackers.eye_tracker import EyeTracker
 from trackers.face_mesh import FrameProcessorProcess
+from trackers.hand_tracker import HandProcessorProcess
 
 def main():
     # 启用 multiprocessing 支持 (Windows 下必须)
@@ -25,6 +26,8 @@ def main():
     # 只能在 main block 内创建 Queue
     input_queue = multiprocessing.Queue(maxsize=2)
     output_queue = multiprocessing.Queue(maxsize=2)
+    hand_input_queue = multiprocessing.Queue(maxsize=2)
+    hand_output_queue = multiprocessing.Queue(maxsize=2)
     stop_event = multiprocessing.Event()
     
     # 初始化管理器
@@ -117,6 +120,15 @@ def main():
     )
     processing_process.start()
 
+    hand_processing_process = HandProcessorProcess(
+        hand_input_queue,
+        hand_output_queue,
+        stop_event,
+        shm_name,
+        frame_shape
+    )
+    hand_processing_process.start()
+
     print("Pipeline started: Capture(Thread) -> SharedMem -> Process(Process) -> Main Loop")
 
     # FPS 计算相关
@@ -125,6 +137,7 @@ def main():
     
     # 本地持有的当前帧副本，用于显示（因为子进程不回传图像）
     current_display_frame = None
+    latest_hand_result = None
 
     try:
         while True:
@@ -154,6 +167,25 @@ def main():
                         input_queue.put({'frame_id': frame_id}, block=False)
                     except queue.Full:
                         pass
+
+                    # 同样通知手部追踪进程
+                    if hand_input_queue.full():
+                        try:
+                            hand_input_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                    
+                    try:
+                        hand_input_queue.put({'frame_id': frame_id}, block=False)
+                    except queue.Full:
+                        pass
+
+            # 检查是否有手部追踪结果
+            try:
+                hand_result_data = hand_output_queue.get_nowait()
+                latest_hand_result = hand_result_data['hand_result']
+            except queue.Empty:
+                pass
 
             # 2. 检查是否有处理结果
             try:
@@ -248,12 +280,22 @@ def main():
                         raw_eye_points, 
                         tracker, 
                         fps, 
-                        gaze_data
+                        gaze_data,
+                        hand_result=latest_hand_result
                     )
                     if should_stop:
                         break
             
             except queue.Empty:
+                # 没有新结果，但可能需要刷新画面（如果只有手部数据更新了或者只是想保持画面流畅）
+                if VISUALIZE and current_display_frame is not None:
+                     # 如果只有手部更新了，或者只是为了显示最新的帧
+                     # 这里简单起见，只有在有 face 结果时才重绘。
+                     # 为了更流畅，即使没有 face result，如果有 frame 更新也应该重绘。
+                     # 但现在的架构是依赖 face result 的 roi_info 来重绘。
+                     # 如果想完全解耦，需要保存上一次的 roi_info
+                     pass
+
                 # 没有新结果，稍微 sleep 避免死循环占用 CPU，或者处理 GUI 事件
                 if VISUALIZE:
                     if cv2.waitKey(1) & 0xFF == 27:
@@ -272,6 +314,10 @@ def main():
         processing_process.join(timeout=2.0)
         if processing_process.is_alive():
             processing_process.terminate()
+
+        hand_processing_process.join(timeout=2.0)
+        if hand_processing_process.is_alive():
+            hand_processing_process.terminate()
             
         video_stream.stop()
         udp_sender.close()
