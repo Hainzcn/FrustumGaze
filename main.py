@@ -140,6 +140,12 @@ def main():
     latest_hand_result = None
     hand_frame_counter = 0
 
+    # 丢包计算相关
+    drop_rate = 0.0
+    stat_start_time = time.time()
+    frames_in_last_sec = 0
+    processed_in_last_sec = 0
+
     try:
         while True:
             # 1. 从摄像头线程获取最新帧
@@ -147,6 +153,9 @@ def main():
             if has_frame:
                 frame, frame_id = frame_data
                 if frame is not None:
+                    # 记录发送的帧数 (每秒窗口)
+                    frames_in_last_sec += 1
+                    
                     # 写入共享内存
                     # 注意：这里简单的直接写入。为了更严谨应该用锁或多缓冲，但对于 30FPS 视频流，
                     # 且只有一个写者，偶尔的读写撕裂通常可接受。
@@ -200,6 +209,27 @@ def main():
                 detection_result = result_data['detection_result']
                 roi_info = result_data['roi_info']
                 
+                # 记录处理完成的帧数 (每秒窗口)
+                processed_in_last_sec += 1
+
+                # 每秒更新一次丢包率
+                current_time = time.time()
+                if current_time - stat_start_time >= 1.0:
+                    if frames_in_last_sec > 0:
+                        # 丢包率 = (输入帧数 - 处理帧数) / 输入帧数
+                        # 限制范围 [0, 1]
+                        calculated_drop = (frames_in_last_sec - processed_in_last_sec) / frames_in_last_sec
+                        drop_rate = max(0.0, min(1.0, calculated_drop))
+                    else:
+                        drop_rate = 0.0
+                    
+                    # 重置计数器
+                    frames_in_last_sec = 0
+                    processed_in_last_sec = 0
+                    stat_start_time = current_time
+
+                last_processed_frame_id = current_frame_id
+
                 # 如果没有显示帧，跳过
                 if current_display_frame is None:
                     continue
@@ -284,7 +314,8 @@ def main():
                         tracker, 
                         fps, 
                         gaze_data,
-                        hand_result=latest_hand_result
+                        hand_result=latest_hand_result,
+                        drop_rate=drop_rate
                     )
                     if should_stop:
                         break

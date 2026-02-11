@@ -24,7 +24,7 @@ class Visualizer:
             (0, 17)
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0):
         """
         统一渲染入口
         """
@@ -55,7 +55,7 @@ class Visualizer:
             )
 
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
-        self._draw_overlay(frame, tracker, fps)
+        self._draw_overlay(frame, tracker, fps, drop_rate)
 
         # 5. 显示并处理按键
         cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
@@ -165,7 +165,7 @@ class Visualizer:
             self.cached_viz_data['text'] = "Gaze on Screen: N/A"
             self.cached_viz_data['text_color'] = (0, 0, 255)
 
-    def _draw_overlay(self, frame, tracker, fps):
+    def _draw_overlay(self, frame, tracker, fps, drop_rate=0.0):
         h, w = frame.shape[:2]
         
         # 绘制视线向量和交点信息 (使用缓存的数据，消除闪烁)
@@ -184,9 +184,16 @@ class Visualizer:
         cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
         cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
 
-        # 绘制 FPS (左上角第一行)
+        # 绘制 FPS (左上角第一行) 和 丢包率
         pd_display = f" | PD: {int(tracker.current_pixel_dist)}px" if tracker.current_pixel_dist > 0 else ""
-        cv2.putText(frame, f"FPS: {int(fps)}{pd_display}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # 格式化丢包率显示
+        drop_color = (0, 255, 0) # Green for low drop
+        if drop_rate > 0.1: drop_color = (0, 255, 255) # Yellow
+        if drop_rate > 0.3: drop_color = (0, 0, 255) # Red
+        
+        info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%{pd_display}"
+        cv2.putText(frame, info_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, drop_color, 2)
         
         # 绘制主视眼标记（黄色圆圈 + 'R'）
         if tracker.dominant_eye_pos is not None:
