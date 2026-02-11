@@ -71,7 +71,7 @@ class Visualizer:
         h, w, _ = frame.shape
         
         for hand_landmarks_lite in hand_result.multi_hand_landmarks:
-             # Draw connections
+            # Draw connections
             for connection in self.HAND_CONNECTIONS:
                 start_idx = connection[0]
                 end_idx = connection[1]
@@ -93,23 +93,23 @@ class Visualizer:
                 cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
 
     def _draw_roi(self, frame, roi_info):
-         h, w = frame.shape[:2]
-         rx, ry, rw, rh, _ = roi_info
-         if rw < w or rh < h:
-             cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
+        h, w = frame.shape[:2]
+        rx, ry, rw, rh, _ = roi_info
+        if rw < w or rh < h:
+            cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
 
     def _draw_iris(self, frame, eye_points, raw_eye_points):
-         # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
-         f_p1, f_p2 = eye_points
-         cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1, cv2.LINE_AA) # Green for filtered
-         cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1, cv2.LINE_AA)
-         
-         # 绘制原始点作为对比 (红色)
-         if raw_eye_points:
-             cx_left, cy_left = raw_eye_points[0]
-             cx_right, cy_right = raw_eye_points[1]
-             cv2.circle(frame, (cx_left, cy_left), 2, (0, 0, 255), -1, cv2.LINE_AA)
-             cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
+        # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
+        f_p1, f_p2 = eye_points
+        cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1, cv2.LINE_AA) # Green for filtered
+        cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1, cv2.LINE_AA)
+        
+        # 绘制原始点作为对比 (红色)
+        if raw_eye_points:
+            cx_left, cy_left = raw_eye_points[0]
+            cx_right, cy_right = raw_eye_points[1]
+            cv2.circle(frame, (cx_left, cy_left), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
 
     def _update_gaze_viz(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs):
         # 获取虹膜 2D 坐标
