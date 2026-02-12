@@ -160,7 +160,7 @@ def calculate_distance(eye_points, frame_width, frame_height, fov=55):
     pixel_distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
     
     # 已知平均瞳距6.5cm
-    real_pupil_distance = 7  # cm
+    real_pupil_distance = 6  # cm
     
     # 计算摄像头的焦距（基于视角和图像宽度）
     fov_rad = math.radians(fov)
