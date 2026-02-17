@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 # import mediapipe as mp # 移除 mediapipe 导入，避免 AttributeError
 from config.settings import LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH
-from utils.math_utils import calculate_single_eye_gaze, calculate_screen_intersection, calculate_weighted_average
+from utils.math_utils import calculate_screen_intersection, calculate_weighted_average
 
 class Visualizer:
     def __init__(self):
@@ -46,12 +46,13 @@ class Visualizer:
 
         # 3. 更新并绘制视线 (如果有数据)
         if gaze_data:
-            self._update_gaze_viz(
+            self._update_gaze_viz_with_tracker(
                 gaze_data['rvec'], 
                 gaze_data['tvec'], 
                 eye_points, 
                 gaze_data['cam_matrix'], 
-                gaze_data['dist_coeffs']
+                gaze_data['dist_coeffs'],
+                tracker
             )
 
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
@@ -156,7 +157,7 @@ class Visualizer:
             # 防止文字超出左边界
             if text_x < 10: text_x = 10
             
-            cv2.putText(frame, head_text, (text_x, base_y), font, font_scale, (0, 255, 255), thickness)
+            cv2.putText(frame, head_text, (text_x, base_y), font, font_scale, (0, 0, 255), thickness)
             base_y += line_spacing
 
         # 绘制第二行
@@ -178,10 +179,10 @@ class Visualizer:
         if raw_eye_points:
             cx_left, cy_left = raw_eye_points[0]
             cx_right, cy_right = raw_eye_points[1]
-            cv2.circle(frame, (cx_left, cy_left), 2, (0, 0, 255), -1, cv2.LINE_AA)
-            cv2.circle(frame, (cx_right, cy_right), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1, cv2.LINE_AA)
 
-    def _update_gaze_viz(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs):
+    def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, tracker):
         # 获取虹膜 2D 坐标
         if len(eye_points) < 2:
             return
@@ -190,10 +191,10 @@ class Visualizer:
         right_iris_2d = eye_points[1]
         
         # 计算左右眼视线
-        l_gaze_vec, l_eye_center_cam = calculate_single_eye_gaze(
+        l_gaze_vec, l_eye_center_cam = tracker.calculate_single_eye_gaze(
             left_iris_2d, LEFT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS
         )
-        r_gaze_vec, r_eye_center_cam = calculate_single_eye_gaze(
+        r_gaze_vec, r_eye_center_cam = tracker.calculate_single_eye_gaze(
             right_iris_2d, RIGHT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS
         )
         

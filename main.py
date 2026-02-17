@@ -13,7 +13,6 @@ from modules.network import UDPSender
 from modules.visualizer import Visualizer
 from modules.shared_mem import create_shared_array
 from utils.image_utils import ImagePreprocessor
-from utils.math_utils import get_head_pose, calculate_distance, calculate_single_eye_gaze, calculate_screen_intersection, calculate_weighted_average
 from trackers.eye_tracker import EyeTracker
 from trackers.face_mesh import FrameProcessorProcess
 from trackers.hand_tracker import HandProcessorProcess
@@ -260,28 +259,18 @@ def main():
                 
                 if detection_result.face_landmarks:
                     for face_landmarks in detection_result.face_landmarks:
-                        # face_landmarks 现在是 simple object list，不是 protobuf
-                        # 获取左右虹膜中心
-                        pt_left_iris = face_landmarks[468]
-                        pt_right_iris = face_landmarks[473]
+                        # 使用 EyeTracker 处理所有逻辑
+                        results = tracker.process_landmarks(
+                            face_landmarks, w, h, camera_fov, cam_matrix, dist_coeffs
+                        )
                         
-                        cx_left = int(pt_left_iris.x * w)
-                        cy_left = int(pt_left_iris.y * h)
-                        
-                        cx_right = int(pt_right_iris.x * w)
-                        cy_right = int(pt_right_iris.y * h)
-                        
-                        raw_eye_points = [(cx_left, cy_left), (cx_right, cy_right)]
-                        
-                        # 滤波
-                        eye_points = tracker.filter_eye_points(raw_eye_points)
-                        
-                        # 计算距离
-                        pixel_dist, estimated_dist = calculate_distance(eye_points, w, h, fov=camera_fov)
-                        
-                        # 计算头部姿态 (注意：face_landmarks 结构变化，get_head_pose 可能需要适配)
-                        # get_head_pose 期望的是有 .x, .y 属性的对象，我们的 DetectionResultLite 里的对象满足这个要求
-                        pitch, yaw, roll, rvec, tvec = get_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, MODEL_POINTS)
+                        if results is None:
+                            continue
+
+                        eye_points = results['eye_points']
+                        raw_eye_points = results['raw_eye_points']
+                        rvec = results['rvec']
+                        tvec = results['tvec']
                         
                         # 准备视线可视化数据
                         if VISUALIZE and rvec is not None and tvec is not None and current_frame_id % 6 == 0:
@@ -291,18 +280,6 @@ def main():
                                 'cam_matrix': cam_matrix,
                                 'dist_coeffs': dist_coeffs
                             }
-
-                        # 校正与发送
-                        correction_factor = math.cos(math.radians(yaw))
-                        if correction_factor < 0.2: correction_factor = 0.2
-                        
-                        corrected_dist = estimated_dist * correction_factor
-                        
-                        filtered_pixel, filtered_estimated = tracker.apply_distance_filter(pixel_dist, corrected_dist)
-                        tracker.current_pixel_dist = filtered_pixel
-                        tracker.current_estimated_dist = filtered_estimated
-                        
-                        tracker.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated)
 
                         try:
                             data_str = f"{tracker.current_estimated_dist:.2f},{tracker.current_offset_x:.2f},{tracker.current_offset_y:.2f}"
