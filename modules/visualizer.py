@@ -24,16 +24,16 @@ class Visualizer:
             (0, 17)
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, hands_pos=None, closest_hand=None):
         """
         统一渲染入口
         """
-        # 1. 绘制 ROI
-        self._draw_roi(frame, roi_info)
+        # 1. 绘制 ROI 和 信息
+        self._draw_roi_and_info(frame, roi_info, tracker)
 
         # 2. 绘制手部关键点
         if hand_result:
-            self.draw_hands(frame, hand_result)
+            self.draw_hands(frame, hand_result, hands_pos, closest_hand)
 
         # 3. 绘制虹膜
         if eye_points and len(eye_points) == 2:
@@ -61,7 +61,7 @@ class Visualizer:
         cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
         return cv2.waitKey(1) & 0xFF == 27 # Returns True if ESC pressed
 
-    def draw_hands(self, frame, hand_result):
+    def draw_hands(self, frame, hand_result, hands_pos=None, closest_hand=None):
         """
         绘制手部关键点
         """
@@ -70,7 +70,7 @@ class Visualizer:
 
         h, w, _ = frame.shape
         
-        for hand_landmarks_lite in hand_result.multi_hand_landmarks:
+        for idx, hand_landmarks_lite in enumerate(hand_result.multi_hand_landmarks):
             # Draw connections
             for connection in self.HAND_CONNECTIONS:
                 start_idx = connection[0]
@@ -84,19 +84,89 @@ class Visualizer:
                     x1, y1 = int(start_point.x * w), int(start_point.y * h)
                     x2, y2 = int(end_point.x * w), int(end_point.y * h)
                     
-                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    # 如果是最近的手，用不同颜色绘制
+                    color = (0, 255, 0)
+                    if closest_hand and closest_hand['id'] == idx:
+                        color = (0, 165, 255) # Orange for closest
+                        
+                    cv2.line(frame, (x1, y1), (x2, y2), color, 2)
                 
             # Draw landmarks
             for landmark in hand_landmarks_lite:
                 x, y = int(landmark.x * w), int(landmark.y * h)
                 cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
                 cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
+            
+            # Draw 3D Position Text
+            if hands_pos:
+                # Find pos for this hand
+                hand_pos = next((p for p in hands_pos if p['id'] == idx), None)
+                if hand_pos:
+                    # 在手腕位置显示坐标
+                    wrist = hand_landmarks_lite[0]
+                    wx, wy = int(wrist.x * w), int(wrist.y * h)
+                    
+                    # 格式化: X, Y, Z (cm)
+                    # 注意：我们计算的是 meters, 转换为 cm
+                    text = f"X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f} cm"
+                    
+                    text_color = (0, 255, 0)
+                    if closest_hand and closest_hand['id'] == idx:
+                        text_color = (0, 165, 255)
+                        text += " (Closest)"
+                    
+                    cv2.putText(frame, text, (wx, wy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
 
-    def _draw_roi(self, frame, roi_info):
+    def _draw_roi_and_info(self, frame, roi_info, tracker):
         h, w = frame.shape[:2]
         rx, ry, rw, rh, _ = roi_info
+        
+        # 1. 绘制 ROI 矩形
         if rw < w or rh < h:
             cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
+
+        # 2. 准备显示信息
+        # Line 1: PD and Head Pos
+        if tracker.current_pixel_dist > 0:
+            if tracker.current_estimated_dist > 200:
+                head_text = "Too far!"
+            else:
+                head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
+        else:
+            head_text = ""
+
+        # Line 2: Gaze Info
+        if self.cached_viz_data['text'] is not None:
+            gaze_text = self.cached_viz_data['text']
+        else:
+            gaze_text = "Gaze: N/A"
+            
+        # 3. 计算位置并绘制 (右对齐于 ROI 右边缘)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 2
+        line_spacing = 20
+        base_y = ry + rh + 20 # 第一行文字的基准 Y 坐标
+        right_align_x = rx + rw # 右对齐的 X 坐标 (ROI 右边缘)
+        
+        # 绘制第一行
+        if head_text:
+            (text_w, text_h), _ = cv2.getTextSize(head_text, font, font_scale, thickness)
+            text_x = right_align_x - text_w
+            # 防止文字超出左边界
+            if text_x < 10: text_x = 10
+            
+            cv2.putText(frame, head_text, (text_x, base_y), font, font_scale, (0, 255, 255), thickness)
+            base_y += line_spacing
+
+        # 绘制第二行
+        if gaze_text:
+            color = self.cached_viz_data['text_color'] if self.cached_viz_data['text_color'] else (255, 0, 255)
+            (text_w, text_h), _ = cv2.getTextSize(gaze_text, font, font_scale, thickness)
+            text_x = right_align_x - text_w
+            if text_x < 10: text_x = 10
+            
+            cv2.putText(frame, gaze_text, (text_x, base_y), font, font_scale, color, thickness)
 
     def _draw_iris(self, frame, eye_points, raw_eye_points):
         # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
@@ -175,24 +245,18 @@ class Visualizer:
                 cv2.line(frame, self.cached_viz_data['l_start'], self.cached_viz_data['l_end'], (255, 0, 0), 2)
                 cv2.line(frame, self.cached_viz_data['r_start'], self.cached_viz_data['r_end'], (255, 0, 0), 2)
 
-            # 绘制交点文本
-            cv2.putText(frame, self.cached_viz_data['text'], (10, 85), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.cached_viz_data['text_color'], 2)
-
         # 绘制光轴中心（十字准星）
         center_x, center_y = w // 2, h // 2
         cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 1)
         cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 1)
 
         # 绘制 FPS (左上角第一行) 和 丢包率
-        pd_display = f" | PD: {int(tracker.current_pixel_dist)}px" if tracker.current_pixel_dist > 0 else ""
-        
         # 格式化丢包率显示
         drop_color = (0, 255, 0) # Green for low drop
         if drop_rate > 0.1: drop_color = (0, 255, 255) # Yellow
         if drop_rate > 0.3: drop_color = (0, 0, 255) # Red
         
-        info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%{pd_display}"
+        info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%"
         cv2.putText(frame, info_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, drop_color, 2)
         
         # 绘制主视眼标记（黄色圆圈 + 'R'）
@@ -201,13 +265,3 @@ class Visualizer:
             if 0 <= dx < w and 0 <= dy < h:
                 cv2.circle(frame, (dx, dy), 8, (0, 255, 255), 2)
                 cv2.putText(frame, "R", (dx + 10, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-        if tracker.current_pixel_dist > 0:
-            if tracker.current_estimated_dist > 200:
-                info_text = "too far!"
-                cv2.putText(frame, info_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            else:
-                # 重构为空间坐标显示
-                # 参考系：原点摄像头，Z光轴，X水平，Y竖直
-                head_pos_text = f"Head Pos: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
-                cv2.putText(frame, head_pos_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)

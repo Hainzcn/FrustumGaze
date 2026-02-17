@@ -7,7 +7,7 @@ import queue
 import math
 import multiprocessing
 
-from config.settings import VISUALIZE, UDP_IP, UDP_PORT, LEFT_IRIS, RIGHT_IRIS, MODEL_POINTS, LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH
+from config.settings import VISUALIZE, UDP_IP, UDP_PORT, LEFT_IRIS, RIGHT_IRIS, MODEL_POINTS, LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL
 from modules.camera import CameraModel, ConfigManager, WebcamVideoStream, select_camera_device, select_resolution
 from modules.network import UDPSender
 from modules.visualizer import Visualizer
@@ -125,7 +125,8 @@ def main():
         hand_output_queue,
         stop_event,
         shm_name,
-        frame_shape
+        frame_shape,
+        fov=camera_fov
     )
     hand_processing_process.start()
 
@@ -138,7 +139,10 @@ def main():
     # 本地持有的当前帧副本，用于显示（因为子进程不回传图像）
     current_display_frame = None
     latest_hand_result = None
+    latest_hands_pos = None
+    latest_closest_hand = None
     hand_frame_counter = 0
+    eye_frame_counter = 0
 
     # 丢包计算相关
     drop_rate = 0.0
@@ -173,14 +177,16 @@ def main():
                         except queue.Empty:
                             pass
                     
-                    try:
-                        input_queue.put({'frame_id': frame_id}, block=False)
-                    except queue.Full:
-                        pass
+                    eye_frame_counter += 1
+                    if eye_frame_counter % EYE_TRACKING_INTERVAL == 0:
+                        try:
+                            input_queue.put({'frame_id': frame_id}, block=False)
+                        except queue.Full:
+                            pass
 
-                    # 同样通知手部追踪进程 (每3帧发送一次)
+                    # 同样通知手部追踪进程 (每多少帧发送一次，由配置决定)
                     hand_frame_counter += 1
-                    if hand_frame_counter % 3 == 0:
+                    if hand_frame_counter % HAND_TRACKING_INTERVAL == 0:
                         if hand_input_queue.full():
                             try:
                                 hand_input_queue.get_nowait()
@@ -195,7 +201,9 @@ def main():
             # 检查是否有手部追踪结果
             try:
                 hand_result_data = hand_output_queue.get_nowait()
-                latest_hand_result = hand_result_data['hand_result']
+                latest_hand_result = hand_result_data.get('hand_result')
+                latest_hands_pos = hand_result_data.get('hands_pos')
+                latest_closest_hand = hand_result_data.get('closest_hand')
             except queue.Empty:
                 pass
 
@@ -315,7 +323,9 @@ def main():
                         fps, 
                         gaze_data,
                         hand_result=latest_hand_result,
-                        drop_rate=drop_rate
+                        drop_rate=drop_rate,
+                        hands_pos=latest_hands_pos,
+                        closest_hand=latest_closest_hand
                     )
                     if should_stop:
                         break

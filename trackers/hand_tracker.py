@@ -3,6 +3,7 @@ import multiprocessing
 import queue
 import time
 import cv2
+import math
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -27,14 +28,66 @@ class HandDetectionResultLite:
                 self.multi_hand_landmarks.append(simple_landmarks)
 
 class HandProcessorProcess(multiprocessing.Process):
-    def __init__(self, input_queue, output_queue, stop_event, shm_name, frame_shape):
+    def __init__(self, input_queue, output_queue, stop_event, shm_name, frame_shape, fov=60.0):
         super().__init__()
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.stop_event = stop_event
         self.shm_name = shm_name
         self.frame_shape = frame_shape
+        self.fov = fov
         self.daemon = True
+
+    def _calculate_hand_pos(self, landmarks, aspect_ratio):
+        """
+        计算手部空间位置 (Camera Space)
+        假设: 手掌宽度 (Index MCP 5 -> Pinky MCP 17) 约为 8cm (0.08m)
+        """
+        HAND_WIDTH_REAL = 0.05  # meters
+        
+        # 获取关键点
+        p5 = landmarks[5]  # INDEX_FINGER_MCP
+        p17 = landmarks[17] # PINKY_MCP
+        
+        # 计算图像平面上的归一化距离 (仅 x, y)
+        dx = p5.x - p17.x
+        dy = p5.y - p17.y
+        w_norm = math.sqrt(dx*dx + dy*dy)
+        
+        if w_norm < 1e-6:
+            return None, None, None
+
+        # 计算 Z (深度)
+        # Z = W_real / (2 * w_norm * tan(fov/2))
+        # 注意: 这里假设 fov 是水平视场角
+        tan_half_fov = math.tan(math.radians(self.fov) / 2.0)
+        z = HAND_WIDTH_REAL / (2.0 * w_norm * tan_half_fov)
+        
+        # 计算 X, Y
+        # 使用手掌中心 (例如 Index MCP 和 Pinky MCP 的中点，或者 WRIST)
+        # 这里使用 5 和 17 的中点作为手掌中心
+        cx = (p5.x + p17.x) / 2.0
+        cy = (p5.y + p17.y) / 2.0
+        
+        # X = Z * (cx - 0.5) * 2 * tan(fov/2)
+        x = z * (cx - 0.5) * 2.0 * tan_half_fov
+        
+        # Y = Z * (cy - 0.5) * 2 * tan(fov_v/2)
+        # 考虑到 aspect_ratio = W / H
+        # tan(fov_v/2) = tan(fov_h/2) / aspect_ratio (近似，或严格推导)
+        # 简单推导: Y / Z = (y_pixel - H/2) / f
+        # f = (W/2) / tan_half_fov
+        # Y = Z * (cy - 0.5) * H / f
+        #   = Z * (cy - 0.5) * H * 2 * tan_half_fov / W
+        #   = Z * (cy - 0.5) * (1/aspect_ratio) * 2 * tan_half_fov
+        y = z * (cy - 0.5) * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
+        
+        # 坐标系: 
+        # X: 右为正
+        # Y: 下为正 (OpenCV 默认) -> 也可以转为 上为正 (-y)
+        # Z: 前为正
+        
+        return x, y, z
 
     def run(self):
         # --- 在子进程中初始化资源 ---
@@ -61,42 +114,53 @@ class HandProcessorProcess(multiprocessing.Process):
             print(f"HandProcessorProcess: Failed to init MediaPipe: {e}")
             return
         
-        print("HandProcessorProcess: Started and Ready.")
+        print(f"HandProcessorProcess: Started and Ready. FOV={self.fov}")
 
         while not self.stop_event.is_set():
             try:
                 # 阻塞等待任务
-                # 任务格式: (frame_id, timestamp_ms)
-                # 图像数据直接从共享内存读取
-                # 使用 timeout 避免死锁
                 task = self.input_queue.get(timeout=0.01)
                 frame_id = task['frame_id']
                 
                 # 从共享内存复制图像数据
                 frame = shm_array.copy()
                 
-                # 降分辨率处理：自适应帧宽高比，将高度降到360像素
+                # 降分辨率处理
                 h, w = frame.shape[:2]
+                aspect_ratio = w / float(h)
                 target_h = 360
                 scale = target_h / float(h)
                 target_w = int(w * scale)
                 
-                # 转换处理后的帧为 RGB，并进行缩放
-                # 注意：MediaPipe 使用归一化坐标，所以不需要手动映射回原始分辨率
-                # 除非需要像素坐标，但我们这里直接传递归一化坐标给主进程
                 processed_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 processed_rgb = cv2.resize(processed_rgb, (target_w, target_h))
                 
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
-                
                 timestamp_ms = int(time.time() * 1000)
                 
                 # MediaPipe 处理
                 detection_result = detector.detect_for_video(mp_image, timestamp_ms)
                 
-                # 将结果转换为轻量级对象以便传输
                 result_lite = HandDetectionResultLite(detection_result.hand_landmarks)
                 
+                # 计算空间位置并找到最近的手
+                closest_hand_info = None
+                min_z = float('inf')
+                
+                # 存储所有手的空间位置，以便 Visualizer 使用
+                hands_pos = []
+
+                if result_lite.multi_hand_landmarks:
+                    for idx, landmarks in enumerate(result_lite.multi_hand_landmarks):
+                        x, y, z = self._calculate_hand_pos(landmarks, aspect_ratio)
+                        
+                        if x is not None:
+                            hands_pos.append({'id': idx, 'x': x, 'y': y, 'z': z})
+                            
+                            if z < min_z:
+                                min_z = z
+                                closest_hand_info = {'id': idx, 'x': x, 'y': y, 'z': z}
+
                 # 将结果放入输出队列
                 if self.output_queue.full():
                     try:
@@ -107,15 +171,15 @@ class HandProcessorProcess(multiprocessing.Process):
                 self.output_queue.put({
                     'frame_id': frame_id,
                     'hand_result': result_lite,
-                    'timestamp': timestamp_ms
+                    'timestamp': timestamp_ms,
+                    'closest_hand': closest_hand_info,
+                    'hands_pos': hands_pos
                 })
                 
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Processing Error in Hand Process: {e}")
-                # import traceback
-                # traceback.print_exc()
 
         # 清理
         detector.close()

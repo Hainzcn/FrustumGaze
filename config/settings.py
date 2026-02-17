@@ -4,6 +4,11 @@ import numpy as np
 # Visualization
 VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计算和 UDP 发送
 
+# Tracking Intervals (每多少帧处理一次)
+# 设置为 1 表示每一帧都处理
+EYE_TRACKING_INTERVAL = 1
+HAND_TRACKING_INTERVAL = 1
+
 # Network
 UDP_IP = "127.0.0.1"
 UDP_PORT = 8888
