@@ -18,14 +18,27 @@ class LandmarkLite:
 
 # 定义简单的 Result 类以便于 Pickle
 class HandDetectionResultLite:
-    def __init__(self, hand_landmarks_list):
+    def __init__(self, hand_landmarks_list, handedness_list=None):
         self.multi_hand_landmarks = []
+        self.multi_handedness = []
         if hand_landmarks_list:
             for landmarks in hand_landmarks_list:
                 simple_landmarks = []
                 for lm in landmarks:
                     simple_landmarks.append(LandmarkLite(lm.x, lm.y, lm.z))
                 self.multi_hand_landmarks.append(simple_landmarks)
+        if handedness_list:
+            # MediaPipe's handedness is a list of lists of categories
+            for handedness in handedness_list:
+                simple_handedness = []
+                for category in handedness:
+                    # category has index, score, display_name, category_name
+                    simple_handedness.append({
+                        'score': category.score, 
+                        'label': category.category_name,
+                        'index': category.index
+                    })
+                self.multi_handedness.append(simple_handedness)
 
 class HandProcessorProcess(multiprocessing.Process):
     def __init__(self, input_queue, output_queue, stop_event, shm_name, frame_shape, fov=60.0):
@@ -37,6 +50,99 @@ class HandProcessorProcess(multiprocessing.Process):
         self.frame_shape = frame_shape
         self.fov = fov
         self.daemon = True
+
+    def _calculate_bbox(self, landmarks):
+        """计算手部边界框 (normalized coordinates)"""
+        x_min = min([lm.x for lm in landmarks])
+        y_min = min([lm.y for lm in landmarks])
+        x_max = max([lm.x for lm in landmarks])
+        y_max = max([lm.y for lm in landmarks])
+        return (x_min, y_min, x_max, y_max)
+
+    def _calculate_iou(self, box1, box2):
+        """计算两个边界框的 IoU 和包含率"""
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+
+        # 计算交集区域
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+
+        if inter_x_max <= inter_x_min or inter_y_max <= inter_y_min:
+            return 0.0, 0.0
+
+        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+
+        # 计算并集区域
+        area1 = (x1_max - x1_min) * (y1_max - y1_min)
+        area2 = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = area1 + area2 - inter_area
+
+        if union_area <= 0:
+            return 0.0, 0.0
+            
+        iou = inter_area / union_area
+        
+        # 计算包含率 (Intersection over Self Area)
+        # 只要有一个框被另一个框严重包含，就返回较高的包含率
+        overlap_1 = inter_area / area1 if area1 > 0 else 0
+        overlap_2 = inter_area / area2 if area2 > 0 else 0
+        max_overlap = max(overlap_1, overlap_2)
+
+        return iou, max_overlap
+
+    def _filter_overlapping_hands(self, landmarks_list, handedness_list, iou_threshold=0.5, overlap_threshold=0.7):
+        """
+        过滤重叠严重的手部检测结果
+        如果两只手的 IoU > threshold 或 包含率 > overlap_threshold，保留置信度更高的那只
+        """
+        if not landmarks_list or len(landmarks_list) < 2:
+            return landmarks_list, handedness_list
+
+        num_hands = len(landmarks_list)
+        keep_indices = set(range(num_hands))
+        
+        # 计算所有手的边界框
+        bboxes = [self._calculate_bbox(lm) for lm in landmarks_list]
+        
+        # 获取每只手的最高置信度
+        scores = []
+        for h_list in handedness_list:
+            # 取该手最高 score 的 category
+            max_score = 0.0
+            if h_list:
+                max_score = max([cat.score for cat in h_list])
+            scores.append(max_score)
+
+        # 两两比较
+        sorted_indices = sorted(range(num_hands), key=lambda k: scores[k], reverse=True)
+        
+        final_indices = []
+        
+        for i in sorted_indices:
+            if i not in keep_indices:
+                continue
+            
+            is_kept = True
+            for j in final_indices:
+                # 检查与已保留的手是否重叠
+                iou, max_overlap = self._calculate_iou(bboxes[i], bboxes[j])
+                
+                # 如果 IoU 过高 或者 存在严重的包含关系 (大框包小框)
+                if iou > iou_threshold or max_overlap > overlap_threshold:
+                    is_kept = False # 与更高置信度的手冲突，丢弃 i
+                    break
+            
+            if is_kept:
+                final_indices.append(i)
+        
+        # 根据 final_indices 重建列表
+        filtered_landmarks = [landmarks_list[i] for i in final_indices]
+        filtered_handedness = [handedness_list[i] for i in final_indices]
+        
+        return filtered_landmarks, filtered_handedness
 
     def _calculate_hand_pos(self, landmarks, aspect_ratio):
         """
@@ -128,7 +234,7 @@ class HandProcessorProcess(multiprocessing.Process):
                 # 降分辨率处理
                 h, w = frame.shape[:2]
                 aspect_ratio = w / float(h)
-                target_h = 360
+                target_h = 720
                 scale = target_h / float(h)
                 target_w = int(w * scale)
                 
@@ -141,7 +247,13 @@ class HandProcessorProcess(multiprocessing.Process):
                 # MediaPipe 处理
                 detection_result = detector.detect_for_video(mp_image, timestamp_ms)
                 
-                result_lite = HandDetectionResultLite(detection_result.hand_landmarks)
+                # --- 过滤重叠手部 (新增) ---
+                filtered_landmarks, filtered_handedness = self._filter_overlapping_hands(
+                    detection_result.hand_landmarks, 
+                    detection_result.handedness
+                )
+                
+                result_lite = HandDetectionResultLite(filtered_landmarks, filtered_handedness)
                 
                 # 计算空间位置并找到最近的手
                 closest_hand_info = None
