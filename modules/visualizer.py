@@ -109,7 +109,9 @@ class Visualizer:
                     
                     # 格式化: X, Y, Z (cm)
                     # 注意：我们计算的是 meters, 转换为 cm
-                    text = f"X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f} cm"
+                    # 计算像素距离 (PD) = w_norm * frame_width (近似)
+                    pd_val = hand_pos.get('w_norm', 0) * w
+                    text = f"PD:{pd_val:.0f}px X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f}cm"
                     
                     text_color = (0, 255, 0)
                     if closest_hand and closest_hand['id'] == idx:

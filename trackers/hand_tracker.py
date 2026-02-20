@@ -55,7 +55,7 @@ class HandProcessorProcess(multiprocessing.Process):
         w_norm = math.sqrt(dx*dx + dy*dy)
         
         if w_norm < 1e-6:
-            return None, None, None
+            return None, None, None, None
 
         # 计算 Z (深度)
         # Z = W_real / (2 * w_norm * tan(fov/2))
@@ -87,7 +87,7 @@ class HandProcessorProcess(multiprocessing.Process):
         # Y: 下为正 (OpenCV 默认) -> 也可以转为 上为正 (-y)
         # Z: 前为正
         
-        return x, y, z
+        return x, y, z, w_norm
 
     def run(self):
         # --- 在子进程中初始化资源 ---
@@ -152,14 +152,14 @@ class HandProcessorProcess(multiprocessing.Process):
 
                 if result_lite.multi_hand_landmarks:
                     for idx, landmarks in enumerate(result_lite.multi_hand_landmarks):
-                        x, y, z = self._calculate_hand_pos(landmarks, aspect_ratio)
+                        x, y, z, w_norm = self._calculate_hand_pos(landmarks, aspect_ratio)
                         
                         if x is not None:
-                            hands_pos.append({'id': idx, 'x': x, 'y': y, 'z': z})
+                            hands_pos.append({'id': idx, 'x': x, 'y': y, 'z': z, 'w_norm': w_norm})
                             
                             if z < min_z:
                                 min_z = z
-                                closest_hand_info = {'id': idx, 'x': x, 'y': y, 'z': z}
+                                closest_hand_info = {'id': idx, 'x': x, 'y': y, 'z': z, 'w_norm': w_norm}
 
                 # 将结果放入输出队列
                 if self.output_queue.full():
