@@ -8,6 +8,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from modules.shared_mem import get_shared_array
+from utils.math_utils import OneEuroFilter, Simple3DKalmanFilter
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
@@ -144,7 +145,7 @@ class HandProcessorProcess(multiprocessing.Process):
         
         return filtered_landmarks, filtered_handedness
 
-    def _calculate_hand_pos(self, landmarks, aspect_ratio):
+    def _calculate_hand_pos(self, landmarks, aspect_ratio, w_norm_filter=None, pos_filter=None, timestamp=None):
         """
         计算手部空间位置 (Camera Space)
         假设: 手掌宽度 (Index MCP 5 -> Pinky MCP 17) 约为 8cm (0.08m)
@@ -162,6 +163,10 @@ class HandProcessorProcess(multiprocessing.Process):
         
         if w_norm < 1e-6:
             return None, None, None, None
+
+        # --- 应用 OneEuroFilter 滤波 (对 w_norm) ---
+        if w_norm_filter and timestamp is not None:
+            w_norm = w_norm_filter.filter(w_norm, timestamp)
 
         # 计算 Z (深度)
         # Z = W_real / (2 * w_norm * tan(fov/2))
@@ -192,6 +197,10 @@ class HandProcessorProcess(multiprocessing.Process):
         # X: 右为正
         # Y: 下为正 (OpenCV 默认) -> 也可以转为 上为正 (-y)
         # Z: 前为正
+
+        # --- 应用 SimpleKalmanFilter 滤波 (对 X, Y, Z) ---
+        if pos_filter:
+            x, y, z = pos_filter.update(x, y, z)
         
         return x, y, z, w_norm
 
@@ -221,6 +230,18 @@ class HandProcessorProcess(multiprocessing.Process):
             return
         
         print(f"HandProcessorProcess: Started and Ready. FOV={self.fov}")
+
+        # 初始化滤波器
+        self.hand_filters = {
+            'Left': {
+                'w_norm': OneEuroFilter(min_cutoff=0.5, beta=0.2),
+                'pos': Simple3DKalmanFilter(process_noise=0.01, measurement_noise=0.1)
+            },
+            'Right': {
+                'w_norm': OneEuroFilter(min_cutoff=0.5, beta=0.2),
+                'pos': Simple3DKalmanFilter(process_noise=0.01, measurement_noise=0.1)
+            }
+        }
 
         while not self.stop_event.is_set():
             try:
@@ -264,7 +285,25 @@ class HandProcessorProcess(multiprocessing.Process):
 
                 if result_lite.multi_hand_landmarks:
                     for idx, landmarks in enumerate(result_lite.multi_hand_landmarks):
-                        x, y, z, w_norm = self._calculate_hand_pos(landmarks, aspect_ratio)
+                        # 获取滤波器
+                        w_norm_filter = None
+                        pos_filter = None
+                        
+                        if result_lite.multi_handedness and idx < len(result_lite.multi_handedness):
+                            # handedness[0] is the category with highest score
+                            categories = result_lite.multi_handedness[idx]
+                            if categories:
+                                label = categories[0]['label'] # "Left" or "Right"
+                                if label in self.hand_filters:
+                                    w_norm_filter = self.hand_filters[label]['w_norm']
+                                    pos_filter = self.hand_filters[label]['pos']
+                        
+                        x, y, z, w_norm = self._calculate_hand_pos(
+                            landmarks, aspect_ratio, 
+                            w_norm_filter=w_norm_filter, 
+                            pos_filter=pos_filter, 
+                            timestamp=timestamp_ms / 1000.0
+                        )
                         
                         if x is not None:
                             hands_pos.append({'id': idx, 'x': x, 'y': y, 'z': z, 'w_norm': w_norm})
