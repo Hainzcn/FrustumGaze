@@ -203,6 +203,24 @@ def main():
                 latest_hand_result = hand_result_data.get('hand_result')
                 latest_hands_pos = hand_result_data.get('hands_pos')
                 latest_closest_hand = hand_result_data.get('closest_hand')
+                
+                # 发送手部数据 (如有最近的手)
+                if latest_closest_hand:
+                    is_pinching = 1 if latest_closest_hand.get('is_pinching', False) else 0
+                    
+                    if is_pinching:
+                        # 捏起时发送捏起点坐标
+                        hx, hy, hz = latest_closest_hand.get('pinch_pos', (0.0, 0.0, 0.0))
+                    else:
+                        # 未捏起时发送手掌中心坐标
+                        hx = latest_closest_hand.get('x', 0.0)
+                        hy = latest_closest_hand.get('y', 0.0)
+                        hz = latest_closest_hand.get('z', 0.0)
+                    
+                    # 格式: H:is_pinching,x,y,z
+                    hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f}"
+                    udp_sender.send(hand_str)
+                    
             except queue.Empty:
                 pass
 
@@ -282,7 +300,7 @@ def main():
                             }
 
                         try:
-                            data_str = f"{tracker.current_estimated_dist:.2f},{tracker.current_offset_x:.2f},{tracker.current_offset_y:.2f}"
+                            data_str = f"G:{tracker.current_estimated_dist:.2f},{tracker.current_offset_x:.2f},{tracker.current_offset_y:.2f}"
                             udp_sender.send(data_str)
                         except Exception as e:
                             print(f"UDP Send Error: {e}")

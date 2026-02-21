@@ -104,7 +104,7 @@ public class EyeGazeFocus : MonoBehaviour
         // 在主线程更新 Target 位置 (保留原有的UDP逻辑)
         if (useEyeData && target != null && Camera.main != null && EyeTrackingDataManager.Instance != null)
         {
-            Vector3 rawData = EyeTrackingDataManager.Instance.LatestData;
+            Vector3 rawData = EyeTrackingDataManager.Instance.GazeData;
             
             // 计算距离 (假设z是深度)
             // 注意：DataManager 中已经应用了缩放 (inputScale)，这里直接使用 magnitude 即可

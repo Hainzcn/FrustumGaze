@@ -20,17 +20,21 @@ public class EyeTrackingDataManager : MonoBehaviour
     [Header("UDP Settings")]
     public int port = 8888;
     public bool runInBackground = true;
-    [Tooltip("全局数据缩放 (例如从厘米转米: 0.01)")]
+    [Tooltip("视线数据缩放 (例如从厘米转米: 0.01)")]
     public float inputScale = 0.01f;
+    [Tooltip("手部数据缩放 (通常为 1.0，因为源数据已经是米)")]
+    public float handInputScale = 1.0f;
 
     [Header("Runtime Data (Read Only)")]
-    [SerializeField] private Vector3 _latestData; // x, y, z (已缩放)
+    [SerializeField] private Vector3 _gazeData; // Gaze: dist, x, y
+    [SerializeField] private Vector3 _handData; // Hand: x, y, z
+    [SerializeField] private bool _isPinching;
 
     // 公共访问属性 (线程安全读取)
-    public Vector3 LatestData
-    {
-        get { return _latestData; }
-    }
+    public Vector3 LatestData => _gazeData; // 兼容旧代码 (视线数据)
+    public Vector3 GazeData => _gazeData;
+    public Vector3 HandData => _handData;
+    public bool IsPinching => _isPinching;
 
     // 内部网络变量
     private Socket _socket;
@@ -43,11 +47,19 @@ public class EyeTrackingDataManager : MonoBehaviour
     private readonly object _dataLock = new object();
 
     // 上采样插值相关变量
-    private Vector3 _networkBuffer; // 接收线程写入的最新数据
-    private bool _hasNewNetworkData = false;
-    private Vector3 _interpolationStart;
-    private Vector3 _interpolationEnd;
-    private float _timeSinceLastUpdate = 0f;
+    private Vector3 _gazeNetworkBuffer; 
+    private bool _hasNewGazeData = false;
+    private Vector3 _gazeStart;
+    private Vector3 _gazeEnd;
+    private float _gazeTime = 0f;
+
+    private Vector3 _handNetworkBuffer;
+    private bool _handPinchBuffer;
+    private bool _hasNewHandData = false;
+    private Vector3 _handStart;
+    private Vector3 _handEnd;
+    private float _handTime = 0f;
+
     private const float TARGET_UPDATE_INTERVAL = 1.0f / 30.0f; // 假设源数据是 30Hz
 
     void Awake()
@@ -64,34 +76,54 @@ public class EyeTrackingDataManager : MonoBehaviour
 
     void Update()
     {
-        // 检查是否有新的网络数据
-        bool hasNew = false;
-        Vector3 newData = Vector3.zero;
+        // --- Gaze Interpolation ---
+        bool hasNewGaze = false;
+        Vector3 newGaze = Vector3.zero;
+
+        // --- Hand Interpolation ---
+        bool hasNewHand = false;
+        Vector3 newHand = Vector3.zero;
+        bool newPinch = false;
 
         lock (_dataLock)
         {
-            if (_hasNewNetworkData)
+            if (_hasNewGazeData)
             {
-                newData = _networkBuffer;
-                hasNew = true;
-                _hasNewNetworkData = false;
+                newGaze = _gazeNetworkBuffer;
+                hasNewGaze = true;
+                _hasNewGazeData = false;
+            }
+            if (_hasNewHandData)
+            {
+                newHand = _handNetworkBuffer;
+                newPinch = _handPinchBuffer;
+                hasNewHand = true;
+                _hasNewHandData = false;
             }
         }
 
-        // 如果有新数据，更新插值起点和终点
-        if (hasNew)
+        // Gaze Update
+        if (hasNewGaze)
         {
-            _interpolationStart = _latestData; // 从当前显示位置开始，保证连续性
-            _interpolationEnd = newData;
-            _timeSinceLastUpdate = 0f;
+            _gazeStart = _gazeData; 
+            _gazeEnd = newGaze;
+            _gazeTime = 0f;
         }
+        _gazeTime += Time.deltaTime;
+        float tGaze = Mathf.Clamp01(_gazeTime / TARGET_UPDATE_INTERVAL);
+        _gazeData = Vector3.Lerp(_gazeStart, _gazeEnd, tGaze);
 
-        // 执行插值计算 (上采样至 Update 帧率，通常为 60Hz 或更高)
-        _timeSinceLastUpdate += Time.deltaTime;
-        float t = Mathf.Clamp01(_timeSinceLastUpdate / TARGET_UPDATE_INTERVAL);
-
-        // 使用线性插值平滑过渡
-        _latestData = Vector3.Lerp(_interpolationStart, _interpolationEnd, t);
+        // Hand Update
+        if (hasNewHand)
+        {
+            _handStart = _handData;
+            _handEnd = newHand;
+            _isPinching = newPinch; // 状态直接更新，不插值
+            _handTime = 0f;
+        }
+        _handTime += Time.deltaTime;
+        float tHand = Mathf.Clamp01(_handTime / TARGET_UPDATE_INTERVAL);
+        _handData = Vector3.Lerp(_handStart, _handEnd, tHand);
     }
 
     void Start()
@@ -190,34 +222,60 @@ public class EyeTrackingDataManager : MonoBehaviour
     {
         try
         {
-            // 简单的逗号分割解析
-            // 优化提示：如果追求极致 0 GC，可以手动遍历 byte[] 解析 float，跳过 string 转换
-            // 但考虑到每帧一次 string alloc 在现代 Unity (SGen/Incremental GC) 中通常可接受
+            if (string.IsNullOrEmpty(text)) return;
 
-            int firstComma = text.IndexOf(',');
+            // 1. Hand Data (H:isPinch,x,y,z)
+            if (text.StartsWith("H:"))
+            {
+                string content = text.Substring(2);
+                string[] parts = content.Split(',');
+                if (parts.Length >= 4)
+                {
+                    int isPinch = int.Parse(parts[0]);
+                    float x = -float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) * handInputScale;
+                    float y = -float.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture) * handInputScale;
+                    float z = -float.Parse(parts[3], System.Globalization.CultureInfo.InvariantCulture) * handInputScale;
+
+                    lock (_dataLock)
+                    {
+                        _handNetworkBuffer = new Vector3(x, y, z);
+                        _handPinchBuffer = (isPinch != 0);
+                        _hasNewHandData = true;
+                    }
+                }
+                return;
+            }
+
+            // 2. Gaze Data (G:z,x,y OR old format z,x,y)
+            string gazeContent = text;
+            if (text.StartsWith("G:"))
+            {
+                gazeContent = text.Substring(2);
+            }
+
+            // 解析 Gaze
+            int firstComma = gazeContent.IndexOf(',');
             if (firstComma == -1) return;
 
-            int secondComma = text.IndexOf(',', firstComma + 1);
+            int secondComma = gazeContent.IndexOf(',', firstComma + 1);
             if (secondComma == -1) return;
 
             // 使用 Substring 解析 (或者用 Span<char> 如果是 .NET Standard 2.1)
-            string sZ = text.Substring(0, firstComma);
-            string sX = text.Substring(firstComma + 1, secondComma - firstComma - 1);
-            string sY = text.Substring(secondComma + 1);
+            string sZ = gazeContent.Substring(0, firstComma);
+            string sX = gazeContent.Substring(firstComma + 1, secondComma - firstComma - 1);
+            string sY = gazeContent.Substring(secondComma + 1);
 
             // 使用 InvariantCulture 防止不同地区系统(如使用逗号小数点的地区)解析错误
-            float x = -float.Parse(sX, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
-            float y = -float.Parse(sY, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
-            float z = -float.Parse(sZ, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
+            float gx = -float.Parse(sX, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
+            float gy = -float.Parse(sY, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
+            float gz = -float.Parse(sZ, System.Globalization.CultureInfo.InvariantCulture) * inputScale;
 
             // 写入数据
             // 由于 Vector3 赋值不是原子的，这里使用 lock 确保数据一致性
             lock (_dataLock)
             {
-                _networkBuffer.x = x;
-                _networkBuffer.y = y;
-                _networkBuffer.z = z;
-                _hasNewNetworkData = true;
+                _gazeNetworkBuffer = new Vector3(gx, gy, gz);
+                _hasNewGazeData = true;
             }
         }
         catch

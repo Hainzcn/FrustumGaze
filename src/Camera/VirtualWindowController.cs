@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System;
 using System.Text;
 using System.Globalization;
@@ -53,7 +53,7 @@ public class VirtualWindowController : MonoBehaviour
         // 从 DataManager 获取数据
         if (EyeTrackingDataManager.Instance != null)
         {
-            Vector3 data = EyeTrackingDataManager.Instance.LatestData;
+            Vector3 data = EyeTrackingDataManager.Instance.GazeData;
             // 只有当接收到有效数据时(Z!=0)才覆盖默认值
             // 注意：data 已经被 DataManager 缩放过，单位应该是米
             if (Mathf.Abs(data.z) > 0.001f)

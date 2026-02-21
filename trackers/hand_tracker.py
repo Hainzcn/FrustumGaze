@@ -145,12 +145,75 @@ class HandProcessorProcess(multiprocessing.Process):
         
         return filtered_landmarks, filtered_handedness
 
+    def _detect_pinch(self, landmarks, z_depth, aspect_ratio):
+        """
+        检测是否捏起 (拇指与其他手指)
+        返回: (is_pinching, pinch_x, pinch_y, pinch_z)
+        """
+        # 关键点索引
+        THUMB_TIP = 4
+        INDEX_TIP = 8
+        MIDDLE_TIP = 12
+        RING_TIP = 16
+        PINKY_TIP = 20
+        
+        TIPS = [INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]
+        
+        thumb = landmarks[THUMB_TIP]
+        
+        # 阈值设定: 2cm (0.02m)
+        PINCH_THRESHOLD_M = 0.02 
+        
+        # 转换因子
+        tan_half_fov = math.tan(math.radians(self.fov) / 2.0)
+        
+        pinching_fingers = []
+        
+        for tip_idx in TIPS:
+            finger = landmarks[tip_idx]
+            dx = thumb.x - finger.x
+            dy = thumb.y - finger.y
+            
+            # 近似实际距离
+            dx_m = dx * z_depth * 2.0 * tan_half_fov
+            dy_m = dy * z_depth * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
+            
+            dist_m = math.sqrt(dx_m*dx_m + dy_m*dy_m)
+            
+            if dist_m < PINCH_THRESHOLD_M:
+                pinching_fingers.append(finger)
+        
+        # 只要有一根手指与拇指接触，就算捏起 (即 >= 2根手指参与)
+        if len(pinching_fingers) > 0:
+            # 计算捏起中心
+            # 取拇指和所有捏起指尖的平均
+            sum_x = thumb.x
+            sum_y = thumb.y
+            count = 1
+            
+            for f in pinching_fingers:
+                sum_x += f.x
+                sum_y += f.y
+                count += 1
+                
+            cx = sum_x / count
+            cy = sum_y / count
+            
+            # 计算捏起点空间坐标
+            px = z_depth * (cx - 0.5) * 2.0 * tan_half_fov
+            py = z_depth * (cy - 0.5) * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
+            pz = z_depth # 简化
+            
+            return True, px, py, pz
+            
+        return False, 0.0, 0.0, 0.0
+
     def _calculate_hand_pos(self, landmarks, aspect_ratio, w_norm_filter=None, pos_filter=None, timestamp=None):
         """
         计算手部空间位置 (Camera Space)
         假设: 手掌宽度 (Index MCP 5 -> Pinky MCP 17) 约为 8cm (0.08m)
         """
-        HAND_WIDTH_REAL = 0.05  # meters
+        HAND_WIDTH_REAL = 0.08  # meters
         
         # 获取关键点
         p5 = landmarks[5]  # INDEX_FINGER_MCP
@@ -288,6 +351,7 @@ class HandProcessorProcess(multiprocessing.Process):
                         # 获取滤波器
                         w_norm_filter = None
                         pos_filter = None
+                        label = "Unknown"
                         
                         if result_lite.multi_handedness and idx < len(result_lite.multi_handedness):
                             # handedness[0] is the category with highest score
@@ -306,11 +370,25 @@ class HandProcessorProcess(multiprocessing.Process):
                         )
                         
                         if x is not None:
-                            hands_pos.append({'id': idx, 'x': x, 'y': y, 'z': z, 'w_norm': w_norm})
+                            # 检测 Pinch
+                            is_pinching, px, py, pz = self._detect_pinch(landmarks, z, aspect_ratio)
+                            
+                            hand_info = {
+                                'id': idx,
+                                'label': label,
+                                'x': x,
+                                'y': y,
+                                'z': z,
+                                'w_norm': w_norm,
+                                'landmarks': landmarks,
+                                'is_pinching': is_pinching,
+                                'pinch_pos': (px, py, pz)
+                            }
+                            hands_pos.append(hand_info)
                             
                             if z < min_z:
                                 min_z = z
-                                closest_hand_info = {'id': idx, 'x': x, 'y': y, 'z': z, 'w_norm': w_norm}
+                                closest_hand_info = hand_info
 
                 # 将结果放入输出队列
                 if self.output_queue.full():

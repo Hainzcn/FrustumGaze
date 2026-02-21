@@ -72,6 +72,15 @@ class Visualizer:
         h, w, _ = frame.shape
         
         for idx, hand_landmarks_lite in enumerate(hand_result.multi_hand_landmarks):
+            # 获取该手的捏起状态
+            is_pinching = False
+            pinch_pos = (0,0,0)
+            if hands_pos:
+                hand_pos = next((p for p in hands_pos if p['id'] == idx), None)
+                if hand_pos:
+                    is_pinching = hand_pos.get('is_pinching', False)
+                    pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
+
             # Draw connections
             for connection in self.HAND_CONNECTIONS:
                 start_idx = connection[0]
@@ -85,17 +94,24 @@ class Visualizer:
                     x1, y1 = int(start_point.x * w), int(start_point.y * h)
                     x2, y2 = int(end_point.x * w), int(end_point.y * h)
                     
-                    # 如果是最近的手，用不同颜色绘制
-                    color = (0, 255, 0)
-                    if closest_hand and closest_hand['id'] == idx:
-                        color = (0, 165, 255) # Orange for closest
+                    # 确定颜色
+                    color = (0, 255, 0) # 默认绿色
+                    if is_pinching:
+                        color = (0, 0, 255) # 捏起时为红色
+                    elif closest_hand and closest_hand['id'] == idx:
+                        color = (0, 165, 255) # 最近的手为橙色 (如果不捏起)
                         
                     cv2.line(frame, (x1, y1), (x2, y2), color, 2)
                 
             # Draw landmarks
             for landmark in hand_landmarks_lite:
                 x, y = int(landmark.x * w), int(landmark.y * h)
-                cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
+                
+                point_color = (0, 0, 255) # 默认点外圈红色
+                if is_pinching:
+                     point_color = (0, 0, 255) # 捏起时保持红色 (或可加深)
+                
+                cv2.circle(frame, (x, y), 4, point_color, -1)
                 cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
             
             # Draw 3D Position Text
@@ -114,11 +130,19 @@ class Visualizer:
                     text = f"PD:{pd_val:.0f}px X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f}cm"
                     
                     text_color = (0, 255, 0)
-                    if closest_hand and closest_hand['id'] == idx:
+                    if is_pinching:
+                        text_color = (0, 0, 255)
+                    elif closest_hand and closest_hand['id'] == idx:
                         text_color = (0, 165, 255)
                         text += " (Closest)"
                     
                     cv2.putText(frame, text, (wx, wy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
+                    
+                    # 如果捏起，显示指尖位置信息
+                    if is_pinching:
+                        px, py, pz = pinch_pos
+                        pinch_text = f"Pinch: X:{px*100:.0f} Y:{py*100:.0f} Z:{pz*100:.0f}cm"
+                        cv2.putText(frame, pinch_text, (wx, wy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
     def _draw_roi_and_info(self, frame, roi_info, tracker):
         h, w = frame.shape[:2]
