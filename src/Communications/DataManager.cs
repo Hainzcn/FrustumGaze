@@ -42,6 +42,14 @@ public class EyeTrackingDataManager : MonoBehaviour
     // 锁对象，用于同步 float 解析后的赋值 (比 lock 整个 socket 操作轻量得多)
     private readonly object _dataLock = new object();
 
+    // 上采样插值相关变量
+    private Vector3 _networkBuffer; // 接收线程写入的最新数据
+    private bool _hasNewNetworkData = false;
+    private Vector3 _interpolationStart;
+    private Vector3 _interpolationEnd;
+    private float _timeSinceLastUpdate = 0f;
+    private const float TARGET_UPDATE_INTERVAL = 1.0f / 30.0f; // 假设源数据是 30Hz
+
     void Awake()
     {
         // 单例设置
@@ -52,6 +60,38 @@ public class EyeTrackingDataManager : MonoBehaviour
         }
         Instance = this;
         DontDestroyOnLoad(gameObject); // 切换场景不销毁
+    }
+
+    void Update()
+    {
+        // 检查是否有新的网络数据
+        bool hasNew = false;
+        Vector3 newData = Vector3.zero;
+
+        lock (_dataLock)
+        {
+            if (_hasNewNetworkData)
+            {
+                newData = _networkBuffer;
+                hasNew = true;
+                _hasNewNetworkData = false;
+            }
+        }
+
+        // 如果有新数据，更新插值起点和终点
+        if (hasNew)
+        {
+            _interpolationStart = _latestData; // 从当前显示位置开始，保证连续性
+            _interpolationEnd = newData;
+            _timeSinceLastUpdate = 0f;
+        }
+
+        // 执行插值计算 (上采样至 Update 帧率，通常为 60Hz 或更高)
+        _timeSinceLastUpdate += Time.deltaTime;
+        float t = Mathf.Clamp01(_timeSinceLastUpdate / TARGET_UPDATE_INTERVAL);
+
+        // 使用线性插值平滑过渡
+        _latestData = Vector3.Lerp(_interpolationStart, _interpolationEnd, t);
     }
 
     void Start()
@@ -174,9 +214,10 @@ public class EyeTrackingDataManager : MonoBehaviour
             // 由于 Vector3 赋值不是原子的，这里使用 lock 确保数据一致性
             lock (_dataLock)
             {
-                _latestData.x = x;
-                _latestData.y = y;
-                _latestData.z = z;
+                _networkBuffer.x = x;
+                _networkBuffer.y = y;
+                _networkBuffer.z = z;
+                _hasNewNetworkData = true;
             }
         }
         catch
