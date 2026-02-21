@@ -9,6 +9,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from modules.shared_mem import get_shared_array
 from utils.math_utils import OneEuroFilter, Simple3DKalmanFilter
+from config import settings
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
@@ -297,12 +298,26 @@ class HandProcessorProcess(multiprocessing.Process):
         # 初始化滤波器
         self.hand_filters = {
             'Left': {
-                'w_norm': OneEuroFilter(min_cutoff=0.5, beta=0.2),
-                'pos': Simple3DKalmanFilter(process_noise=0.01, measurement_noise=0.1)
+                'w_norm': OneEuroFilter(
+                    min_cutoff=settings.HAND_ONE_EURO_MIN_CUTOFF, 
+                    beta=settings.HAND_ONE_EURO_BETA,
+                    d_cutoff=settings.HAND_ONE_EURO_D_CUTOFF
+                ),
+                'pos': Simple3DKalmanFilter(
+                    process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
+                    measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
+                )
             },
             'Right': {
-                'w_norm': OneEuroFilter(min_cutoff=0.5, beta=0.2),
-                'pos': Simple3DKalmanFilter(process_noise=0.01, measurement_noise=0.1)
+                'w_norm': OneEuroFilter(
+                    min_cutoff=settings.HAND_ONE_EURO_MIN_CUTOFF, 
+                    beta=settings.HAND_ONE_EURO_BETA,
+                    d_cutoff=settings.HAND_ONE_EURO_D_CUTOFF
+                ),
+                'pos': Simple3DKalmanFilter(
+                    process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
+                    measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
+                )
             }
         }
 

@@ -5,6 +5,7 @@ import math
 import numpy as np
 from modules.filters import OneEuroFilter, OneDKalmanFilter
 from config.settings import MODEL_POINTS
+import config.settings as settings
 
 class EyeTracker:
     def __init__(self):
@@ -14,11 +15,11 @@ class EyeTracker:
         self.current_offset_y = 0
         
         # 初始化距离平滑卡尔曼滤波器（二级层）
-        self.pixel_dist_filter = OneDKalmanFilter(Q=0.1, R=5.0)
-        self.real_dist_filter = OneDKalmanFilter(Q=0.1, R=5.0)
+        self.pixel_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
+        self.real_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
         # 偏移量滤波器（二级层）
-        self.offset_x_filter = OneDKalmanFilter(Q=0.1, R=0.1)
-        self.offset_y_filter = OneDKalmanFilter(Q=0.1, R=0.1)
+        self.offset_x_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
+        self.offset_y_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
         
         # 记录主视眼位置用于绘制
         self.dominant_eye_pos = None
@@ -33,10 +34,10 @@ class EyeTracker:
         self.filters_initialized = False
         # 保持当前距离值直到计算出新值以避免闪烁
 
-    def _get_filter(self, name, value, min_cutoff=0.5, beta=0.1):
+    def _get_filter(self, name, value, min_cutoff=settings.FACE_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_ONE_EURO_BETA):
         current_time = time.time()
         if name not in self.filters:
-            self.filters[name] = OneEuroFilter(current_time, value, min_cutoff=min_cutoff, beta=beta)
+            self.filters[name] = OneEuroFilter(current_time, value, min_cutoff=min_cutoff, beta=beta, d_cutoff=settings.FACE_ONE_EURO_D_CUTOFF)
             return value
         return self.filters[name].filter(current_time, value)
 
