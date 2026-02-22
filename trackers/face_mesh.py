@@ -8,6 +8,7 @@ import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from modules.shared_mem import get_shared_array
+from utils.image_utils import GlobalImagePreprocessor
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
@@ -51,18 +52,19 @@ class FrameProcessorProcess(multiprocessing.Process):
             return
 
         # 2. 初始化 MediaPipe (必须在子进程中进行)
-        base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
-        options = vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            output_face_blendshapes=False,
-            output_facial_transformation_matrixes=False,
-            num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-            running_mode=vision.RunningMode.VIDEO)
-        
+        # 注意：这里假设 model_asset_path 在当前工作目录
         try:
+            base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
+            options = vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+                num_faces=1,
+                min_face_detection_confidence=0.5,
+                min_face_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+                running_mode=vision.RunningMode.VIDEO)
+            
             detector = vision.FaceLandmarker.create_from_options(options)
         except Exception as e:
             print(f"FrameProcessorProcess: Failed to init MediaPipe: {e}")
@@ -73,23 +75,21 @@ class FrameProcessorProcess(multiprocessing.Process):
         while not self.stop_event.is_set():
             try:
                 # 阻塞等待任务
-                # 任务格式: (frame_id, timestamp_ms)
-                # 图像数据直接从共享内存读取
-                task = self.input_queue.get(timeout=0.01)
+                # 任务格式: {'frame_id': ...}
+                task = self.input_queue.get(timeout=0.1) # 增加超时时间防止空轮询过快
                 frame_id = task['frame_id']
                 
-                # 从共享内存复制图像数据 (拷贝一份以便处理，避免读写冲突)
-                # 注意：如果处理速度快，也可以不拷贝直接处理 crop，但 preprocessor 需要修改
-                # 这里为了安全起见，copy 一份
-                frame = shm_array.copy()
-                
+                # 从共享内存直接访问 (Zero-Copy)
+                frame = shm_array
                 h, w = frame.shape[:2]
                 
                 # 预处理：ROI -> 放大 -> 滤波 -> 增强
+                # process 内部会进行 crop，因此不会修改原始 shm_array
                 processed_frame, roi_info = self.preprocessor.process(frame, self.last_landmarks_norm)
                 
-                # 转换处理后的帧为 RGB
-                processed_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                # 转换处理后的帧为 RGB (MediaPipe 需要)
+                # 使用全局工具
+                processed_rgb = GlobalImagePreprocessor.to_rgb(processed_frame)
                 
                 # MediaPipe 处理
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
@@ -98,6 +98,8 @@ class FrameProcessorProcess(multiprocessing.Process):
                 detection_result = detector.detect_for_video(mp_image, timestamp_ms)
                 
                 # 坐标还原 (Local Normalized -> Global Normalized)
+                # ... (保持原有逻辑)
+
                 self.preprocessor.restore_landmarks(detection_result, roi_info, w, h)
                 
                 # 更新上一帧 Landmarks (用于下一帧 ROI 计算)

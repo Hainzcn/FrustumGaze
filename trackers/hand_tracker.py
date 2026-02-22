@@ -10,6 +10,7 @@ from mediapipe.tasks.python import vision
 import numpy as np
 from modules.shared_mem import get_shared_array
 from utils.math_utils import OneEuroFilter, Simple3DKalmanFilter
+from utils.image_utils import GlobalImagePreprocessor
 from config import settings
 
 # 定义简单的 Landmark 类以便于 Pickle
@@ -489,8 +490,8 @@ class HandProcessorProcess(multiprocessing.Process):
                     )
                     cached_dims = (target_w, target_h)
                 
-                processed_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                processed_rgb = cv2.resize(processed_rgb, (target_w, target_h))
+                processed_rgb = GlobalImagePreprocessor.to_rgb(frame)
+                processed_rgb = GlobalImagePreprocessor.resize_image(processed_rgb, target_size=(target_w, target_h))
                 
                 # 轻量高斯模糊
                 processed_rgb = cv2.GaussianBlur(processed_rgb, (5, 5), 0)

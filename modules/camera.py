@@ -92,12 +92,13 @@ class ConfigManager:
 
 # --- 视频流获取优化 (Producer) ---
 class WebcamVideoStream:
-    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0):
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_array=None):
         self.src = src
         self.width = width
         self.height = height
         self.api_preference = api_preference
         self.exposure = exposure
+        self.shm_array = shm_array
         
         # 初始化摄像头
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
@@ -151,6 +152,10 @@ class WebcamVideoStream:
         self.t.start()
         return self
 
+    def set_shared_memory(self, shm_array):
+        """延迟设置共享内存"""
+        self.shm_array = shm_array
+
     def update(self):
         while True:
             if self.stopped:
@@ -165,6 +170,18 @@ class WebcamVideoStream:
 
             self.frame_id += 1
             
+            # 如果配置了共享内存，直接写入
+            if self.shm_array is not None and frame is not None:
+                try:
+                    # 确保尺寸匹配
+                    if frame.shape == self.shm_array.shape:
+                        np.copyto(self.shm_array, frame)
+                    else:
+                        # 尺寸不匹配时，进行 resize 或 裁剪
+                        pass 
+                except Exception as e:
+                    pass
+
             # 尝试放入队列，如果满了则移除旧的（非阻塞尝试）
             if self.frame_queue.full():
                 try:
@@ -173,7 +190,11 @@ class WebcamVideoStream:
                     pass
             
             try:
-                self.frame_queue.put((frame, self.frame_id), block=False)
+                # 如果使用共享内存，队列中只放 (None, frame_id) 以减少拷贝
+                if self.shm_array is not None:
+                    self.frame_queue.put((None, self.frame_id), block=False)
+                else:
+                    self.frame_queue.put((frame, self.frame_id), block=False)
             except queue.Full:
                 pass # Should not happen if we just removed one, but safe guard
 

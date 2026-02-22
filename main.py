@@ -70,6 +70,7 @@ def main():
     print(f"目标分辨率: {target_w}x{target_h}")
 
     # 初始化多线程视频流 (Producer Thread inside Main Process)
+    # 暂时不传入 shm_array，因为需要先确认实际分辨率
     video_stream = WebcamVideoStream(src=camera_index, width=target_w, height=target_h, api_preference=used_api, exposure=exposure_val).start()
 
     # 等待摄像头预热
@@ -83,6 +84,19 @@ def main():
     if int(actual_w) != target_w or int(actual_h) != target_h:
         print(f"警告: 实际分辨率 ({int(actual_w)}x{int(actual_h)}) 与请求分辨率 ({target_w}x{target_h}) 不一致。")
 
+    # 初始化共享内存块
+    # 创建足够大的共享内存块用于存图像 (Height, Width, 3)
+    frame_shape = (int(actual_h), int(actual_w), 3)
+    shm_name = "frustum_gaze_frame_buffer"
+    try:
+        shm_manager, shm_array = create_shared_array(frame_shape, dtype=np.uint8, name=shm_name)
+    except Exception as e:
+        print(f"Failed to create shared memory: {e}")
+        return
+        
+    # 注入共享内存到 VideoStream
+    video_stream.set_shared_memory(shm_array)
+
     # 相机模型初始化
     camera_model = CameraModel(actual_w, actual_h, camera_fov)
     cam_matrix = camera_model.cam_matrix
@@ -95,16 +109,6 @@ def main():
     tracker = EyeTracker()
     preprocessor = ImagePreprocessor() # 这个将传递给子进程
     visualizer = Visualizer()
-
-    # --- 共享内存初始化 ---
-    # 创建足够大的共享内存块用于存图像 (Height, Width, 3)
-    frame_shape = (int(actual_h), int(actual_w), 3)
-    shm_name = "frustum_gaze_frame_buffer"
-    try:
-        shm_manager, shm_array = create_shared_array(frame_shape, dtype=np.uint8, name=shm_name)
-    except Exception as e:
-        print(f"Failed to create shared memory: {e}")
-        return
 
     # --- 启动处理进程 ---
     processing_process = FrameProcessorProcess(
@@ -135,9 +139,18 @@ def main():
     
     # 本地持有的当前帧副本，用于显示（因为子进程不回传图像）
     current_display_frame = None
+    
+    # 缓存最新的检测结果
     latest_hand_result = None
     latest_hands_pos = None
     latest_closest_hand = None
+    latest_face_result = None
+    latest_roi_info = None
+    latest_eye_points = []
+    latest_raw_eye_points = []
+    latest_gaze_data = None
+    latest_fps = 0
+    
     hand_frame_counter = 0
     eye_frame_counter = 0
 
@@ -150,50 +163,55 @@ def main():
     try:
         while True:
             # 1. 从摄像头线程获取最新帧
+            # 优化：frame 可能为 None (如果 shm_array 被使用)，因为数据已经直接写入共享内存
             has_frame, frame_data = video_stream.read()
             if has_frame:
                 frame, frame_id = frame_data
-                if frame is not None:
-                    # 记录发送的帧数 (每秒窗口)
-                    frames_in_last_sec += 1
-                    
-                    # 写入共享内存
-                    # 注意：这里简单的直接写入。为了更严谨应该用锁或多缓冲，但对于 30FPS 视频流，
-                    # 且只有一个写者，偶尔的读写撕裂通常可接受。
-                    # 为了减少撕裂，可以使用 copyto
+                
+                # 如果 frame 为 None，说明数据已经在 shm_array 中
+                if frame is None:
+                    # 使用共享内存数据
+                    # 为了不污染共享内存（因为子进程要读原始图），显示用的帧必须拷贝
+                    current_display_frame = shm_array.copy()
+                else:
+                    # 传统模式（备用）
                     np.copyto(shm_array, frame)
-                    
-                    # 更新本地显示用的帧副本
                     current_display_frame = frame
-                    
-                    # 通知子进程有新帧
-                    # 非阻塞 put，如果队列满了就丢弃旧任务（保持实时性）
-                    if input_queue.full():
+                
+                # 记录发送的帧数 (每秒窗口)
+                frames_in_last_sec += 1
+                
+                # 通知子进程有新帧
+                # 非阻塞 put，如果队列满了就丢弃旧任务（保持实时性）
+                
+                # 先尝试腾出空间
+                if input_queue.full():
+                    try:
+                        input_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                
+                eye_frame_counter += 1
+                if eye_frame_counter % EYE_TRACKING_INTERVAL == 0:
+                    try:
+                        input_queue.put({'frame_id': frame_id}, block=False)
+                    except queue.Full:
+                        pass
+
+                # 同样通知手部追踪进程 (每多少帧发送一次，由配置决定)
+                hand_frame_counter += 1
+                if hand_frame_counter % HAND_TRACKING_INTERVAL == 0:
+                    # 先尝试腾出空间
+                    if hand_input_queue.full():
                         try:
-                            input_queue.get_nowait()
+                            hand_input_queue.get_nowait()
                         except queue.Empty:
                             pass
                     
-                    eye_frame_counter += 1
-                    if eye_frame_counter % EYE_TRACKING_INTERVAL == 0:
-                        try:
-                            input_queue.put({'frame_id': frame_id}, block=False)
-                        except queue.Full:
-                            pass
-
-                    # 同样通知手部追踪进程 (每多少帧发送一次，由配置决定)
-                    hand_frame_counter += 1
-                    if hand_frame_counter % HAND_TRACKING_INTERVAL == 0:
-                        if hand_input_queue.full():
-                            try:
-                                hand_input_queue.get_nowait()
-                            except queue.Empty:
-                                pass
-                        
-                        try:
-                            hand_input_queue.put({'frame_id': frame_id}, block=False)
-                        except queue.Full:
-                            pass
+                    try:
+                        hand_input_queue.put({'frame_id': frame_id}, block=False)
+                    except queue.Full:
+                        pass
 
             # 检查是否有手部追踪结果
             try:
@@ -218,60 +236,39 @@ def main():
             except queue.Empty:
                 pass
 
-            # 2. 检查是否有处理结果
+            # 2. 检查是否有处理结果 (人脸)
             try:
                 # 非阻塞获取结果
                 result_data = output_queue.get_nowait()
                 
                 # 解析结果
                 current_frame_id = result_data['frame_id']
-                detection_result = result_data['detection_result']
-                roi_info = result_data['roi_info']
+                latest_face_result = result_data['detection_result']
+                latest_roi_info = result_data['roi_info']
                 
                 # 记录处理完成的帧数 (每秒窗口)
                 processed_in_last_sec += 1
 
-                # 每秒更新一次丢包率
-                current_time = time.time()
-                if current_time - stat_start_time >= 1.0:
-                    if frames_in_last_sec > 0:
-                        # 丢包率 = (输入帧数 - 处理帧数) / 输入帧数
-                        # 限制范围 [0, 1]
-                        calculated_drop = (frames_in_last_sec - processed_in_last_sec) / frames_in_last_sec
-                        drop_rate = max(0.0, min(1.0, calculated_drop))
-                    else:
-                        drop_rate = 0.0
-                    
-                    # 重置计数器
-                    frames_in_last_sec = 0
-                    processed_in_last_sec = 0
-                    stat_start_time = current_time
-
                 last_processed_frame_id = current_frame_id
-
-                # 如果没有显示帧，跳过
-                if current_display_frame is None:
-                    continue
-                    
-                frame = current_display_frame # 使用最新的帧进行绘制（可能会有轻微延迟不对齐，但响应快）
-                h, w = frame.shape[:2]
                 
-                # 计算 FPS
+                # 更新 FPS
                 new_frame_time = time.time()
-                fps = 0
                 if prev_frame_time > 0:
                     delta = new_frame_time - prev_frame_time
                     if delta > 0:
-                        fps = 1.0 / delta
+                        latest_fps = 1.0 / delta
                 prev_frame_time = new_frame_time
                 
-                eye_points = []
-                raw_eye_points = []
-                gaze_data = None
+                # 处理视线数据 (更新 latest_eye_points 等)
+                latest_eye_points = []
+                latest_raw_eye_points = []
+                latest_gaze_data = None
                 
-                if detection_result.face_landmarks:
-                    for face_landmarks in detection_result.face_landmarks:
+                if latest_face_result.face_landmarks:
+                    for face_landmarks in latest_face_result.face_landmarks:
                         # 使用 EyeTracker 处理所有逻辑
+                        # 需要当前的图像尺寸
+                        h, w = frame_shape[:2]
                         results = tracker.process_landmarks(
                             face_landmarks, w, h, camera_fov, cam_matrix, dist_coeffs
                         )
@@ -279,14 +276,14 @@ def main():
                         if results is None:
                             continue
 
-                        eye_points = results['eye_points']
-                        raw_eye_points = results['raw_eye_points']
+                        latest_eye_points = results['eye_points']
+                        latest_raw_eye_points = results['raw_eye_points']
                         rvec = results['rvec']
                         tvec = results['tvec']
                         
                         # 准备视线可视化数据
-                        if VISUALIZE and rvec is not None and tvec is not None and current_frame_id % 6 == 0:
-                            gaze_data = {
+                        if VISUALIZE and rvec is not None and tvec is not None:
+                            latest_gaze_data = {
                                 'rvec': rvec,
                                 'tvec': tvec,
                                 'cam_matrix': cam_matrix,
@@ -301,27 +298,47 @@ def main():
                             print(f"UDP Send Error: {e}")
                 else:
                     tracker.reset()
-
-                # 3. 可视化渲染
-                if VISUALIZE:
-                    should_stop = visualizer.render(
-                        frame, 
-                        roi_info, 
-                        eye_points, 
-                        raw_eye_points, 
-                        tracker, 
-                        fps, 
-                        gaze_data,
-                        hand_result=latest_hand_result,
-                        drop_rate=drop_rate,
-                        hands_pos=latest_hands_pos,
-                        closest_hand=latest_closest_hand
-                    )
-                    if should_stop:
-                        break
             
             except queue.Empty:
-                # 没有新结果，稍微 sleep 避免死循环占用 CPU，或者处理 GUI 事件
+                pass
+
+            # 每秒更新一次丢包率
+            current_time = time.time()
+            if current_time - stat_start_time >= 1.0:
+                if frames_in_last_sec > 0:
+                    # 丢包率 = (输入帧数 - 处理帧数) / 输入帧数
+                    calculated_drop = (frames_in_last_sec - processed_in_last_sec) / frames_in_last_sec
+                    drop_rate = max(0.0, min(1.0, calculated_drop))
+                else:
+                    drop_rate = 0.0
+                
+                # 重置计数器
+                frames_in_last_sec = 0
+                processed_in_last_sec = 0
+                stat_start_time = current_time
+
+            # 3. 可视化渲染 (解耦：只要有帧就渲染，使用最新的检测结果)
+            if current_display_frame is not None and VISUALIZE:
+                # 使用 current_display_frame (已是副本) 进行绘制
+                frame_to_show = current_display_frame 
+                
+                should_stop = visualizer.render(
+                    frame_to_show, 
+                    latest_roi_info, 
+                    latest_eye_points, 
+                    latest_raw_eye_points, 
+                    tracker, 
+                    latest_fps, 
+                    latest_gaze_data,
+                    hand_result=latest_hand_result,
+                    drop_rate=drop_rate,
+                    hands_pos=latest_hands_pos,
+                    closest_hand=latest_closest_hand
+                )
+                if should_stop:
+                    break
+            else:
+                # 即使不渲染，也要处理事件循环以保持响应 (虽然在不显示窗口时意义不大)
                 if VISUALIZE:
                     if cv2.waitKey(1) & 0xFF == 27:
                         break

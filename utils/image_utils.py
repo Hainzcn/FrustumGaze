@@ -2,20 +2,85 @@
 import cv2
 import numpy as np
 
+class GlobalImagePreprocessor:
+    """
+    全局图像预处理工具类
+    提供静态方法用于缩放、灰度化、色域转换等，供所有模块复用
+    """
+    
+    @staticmethod
+    def resize_image(image, target_size=None, scale_factor=None, interpolation=cv2.INTER_LINEAR):
+        """
+        统一缩放逻辑
+        :param image: 输入图像
+        :param target_size: (width, height)
+        :param scale_factor: 缩放比例 (如果提供了 target_size 则忽略)
+        :param interpolation: 插值方法
+        :return: 缩放后的图像
+        """
+        if image is None:
+            return None
+            
+        if target_size is not None:
+            return cv2.resize(image, target_size, interpolation=interpolation)
+        elif scale_factor is not None:
+            return cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=interpolation)
+        return image
+
+    @staticmethod
+    def to_gray(image):
+        """转为灰度图"""
+        if len(image.shape) == 2:
+            return image
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    @staticmethod
+    def to_rgb(image):
+        """转为 RGB (MediaPipe 需要)"""
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return image
+
+    @staticmethod
+    def to_lab(image):
+        """转为 LAB"""
+        return cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        
+    @staticmethod
+    def from_lab_to_bgr(image):
+        """从 LAB 转回 BGR"""
+        return cv2.cvtColor(image, cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    def apply_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
+        """
+        应用 CLAHE (对比度受限自适应直方图均衡化)
+        如果是彩色图，只对 L 通道应用
+        """
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        
+        if len(image.shape) == 3:
+            # Convert to LAB color space
+            lab = GlobalImagePreprocessor.to_lab(image)
+            l, a, b = cv2.split(lab)
+            l2 = clahe.apply(l)
+            lab = cv2.merge((l2, a, b))
+            return GlobalImagePreprocessor.from_lab_to_bgr(lab)
+        else:
+            # Grayscale
+            return clahe.apply(image)
+
 class ImagePreprocessor:
     def __init__(self):
         self.last_roi = None # (x, y, w, h)
         self.alpha = 0.7 # ROI 平滑因子 (0-1)
-        self.clahe = None # 延迟初始化以支持 pickle
+        # self.clahe = None # 移除：改用 GlobalImagePreprocessor
 
     def process(self, frame, last_landmarks=None):
         """
         预处理：ROI 裁剪 -> 放大 -> 双边滤波 -> 对比度增强
         返回：processed_frame, roi_info (x, y, w, h, scale)
         """
-        if self.clahe is None:
-            self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-
         h_frame, w_frame = frame.shape[:2]
         
         # 1. 计算 ROI
@@ -40,17 +105,15 @@ class ImagePreprocessor:
             scale_factor = target_min_size / min_dim
             new_w = int(w * scale_factor)
             new_h = int(h * scale_factor)
-            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            # 使用全局工具
+            crop = GlobalImagePreprocessor.resize_image(crop, target_size=(new_w, new_h))
         
         # 3. 双边滤波 (边缘保留平滑)
         # (已移除注释代码)
         
         # 4. 对比度增强 (L 通道 CLAHE)
-        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l2 = self.clahe.apply(l)
-        lab = cv2.merge((l2, a, b))
-        crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        # 使用全局工具
+        crop = GlobalImagePreprocessor.apply_clahe(crop)
         
         return crop, (x, y, w, h, scale_factor)
 
