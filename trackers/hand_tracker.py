@@ -212,6 +212,7 @@ class HandProcessorProcess(multiprocessing.Process):
     def _calculate_hand_pos(self, landmarks, aspect_ratio, w_norm_filter=None, pos_filter=None, timestamp=None):
         """
         计算手部空间位置 (Camera Space)
+        注意: 这里使用几何估算 (Geometric Estimation) 而非 PnP，假设手掌宽度固定。
         假设: 手掌宽度 (Index MCP 5 -> Pinky MCP 17) 约为 8cm (0.08m)
         """
         HAND_WIDTH_REAL = 0.08  # meters
@@ -220,9 +221,9 @@ class HandProcessorProcess(multiprocessing.Process):
         p5 = landmarks[5]  # INDEX_FINGER_MCP
         p17 = landmarks[17] # PINKY_MCP
         
-        # 计算图像平面上的归一化距离 (仅 x, y)
+        # 计算图像平面上的归一化距离 (考虑 Aspect Ratio)
         dx = p5.x - p17.x
-        dy = p5.y - p17.y
+        dy = (p5.y - p17.y) * (1.0 / aspect_ratio)
         w_norm = math.sqrt(dx*dx + dy*dy)
         
         if w_norm < 1e-6:
@@ -339,6 +340,9 @@ class HandProcessorProcess(multiprocessing.Process):
                 
                 processed_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 processed_rgb = cv2.resize(processed_rgb, (target_w, target_h))
+                
+                # 轻量高斯模糊
+                processed_rgb = cv2.GaussianBlur(processed_rgb, (5, 5), 0)
                 
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
                 timestamp_ms = int(time.time() * 1000)
