@@ -201,12 +201,7 @@ class HandProcessorProcess(multiprocessing.Process):
             cx = sum_x / count
             cy = sum_y / count
             
-            # 计算捏起点空间坐标 (已取消计算，仅返回占位符)
-            px = 0.0
-            py = 0.0
-            pz = 0.0 
-            
-            return True, px, py, pz, cx, cy
+            return True, 0.0, 0.0, 0.0, cx, cy
             
         return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -389,23 +384,10 @@ class HandProcessorProcess(multiprocessing.Process):
         # rotation_vector 是旋转向量，需要转换为旋转矩阵
         R, _ = cv2.Rodrigues(rotation_vector)
         # Yaw 计算通常依赖于旋转矩阵的具体定义。假设标准相机坐标系:
-        # sy = sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
-        # singular = sy < 1e-6
-        # if not singular:
-        #     x_rot = atan2(R[2,1] , R[2,2])
-        #     y_rot = atan2(-R[2,0], sy)
-        #     z_rot = atan2(R[1,0], R[0,0])
-        # else:
-        #     x_rot = atan2(-R[1,2], R[1,1])
-        #     y_rot = atan2(-R[2,0], sy)
-        #     z_rot = 0
         
         # 简化计算 (假设主要关注水平旋转)
         # Yaw = atan2(R[0,2], R[2,2]) (视定义而定)
         # 这里使用通用的 Euler Angles 计算
-        # pitch = math.atan2(R[2,1], R[2,2])
-        # yaw = math.atan2(-R[2,0], math.sqrt(R[2,1]**2 + R[2,2]**2))
-        # roll = math.atan2(R[1,0], R[0,0])
         
         yaw = math.atan2(-R[2,0], math.sqrt(R[2,1]**2 + R[2,2]**2))
         yaw_deg = math.degrees(yaw)

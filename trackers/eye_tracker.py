@@ -3,8 +3,7 @@ import cv2
 import time
 import math
 import numpy as np
-from modules.filters import OneDKalmanFilter
-from utils.math_utils import OneEuroFilter
+from utils.math_utils import OneEuroFilter, OneDKalmanFilter
 from config.settings import MODEL_POINTS
 import config.settings as settings
 
@@ -229,11 +228,6 @@ class EyeTracker:
         projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
         error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
         
-        # 如果误差过大 (例如 > 10 像素)，可能意味着解算不稳定或模型不匹配
-        # 这里仅作记录或 debug，暂不强制丢弃，以免在极端角度下丢失跟踪
-        # if error > 10.0:
-        #     print(f"High Reprojection Error: {error:.2f}")
-
         # 计算欧拉角
         rmat, jac = cv2.Rodrigues(rotation_vector)
         angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)

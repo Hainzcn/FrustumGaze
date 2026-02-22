@@ -2,9 +2,7 @@
 import cv2
 import numpy as np
 import time
-import threading
 import queue
-import math
 import multiprocessing
 
 from config.settings import VISUALIZE, UDP_IP, UDP_PORT, LEFT_IRIS, RIGHT_IRIS, MODEL_POINTS, LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL
@@ -322,15 +320,6 @@ def main():
                         break
             
             except queue.Empty:
-                # 没有新结果，但可能需要刷新画面（如果只有手部数据更新了或者只是想保持画面流畅）
-                if VISUALIZE and current_display_frame is not None:
-                    # 如果只有手部更新了，或者只是为了显示最新的帧
-                    # 这里简单起见，只有在有 face 结果时才重绘。
-                    # 为了更流畅，即使没有 face result，如果有 frame 更新也应该重绘。
-                    # 但现在的架构是依赖 face result 的 roi_info 来重绘。
-                    # 如果想完全解耦，需要保存上一次的 roi_info
-                    pass
-
                 # 没有新结果，稍微 sleep 避免死循环占用 CPU，或者处理 GUI 事件
                 if VISUALIZE:
                     if cv2.waitKey(1) & 0xFF == 27:

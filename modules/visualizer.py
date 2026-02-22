@@ -30,10 +30,7 @@ class Visualizer:
         """
         统一渲染入口
         """
-        # 1. 绘制 ROI 和 信息
-        # self._draw_roi_and_info(frame, roi_info, tracker)
-
-        # 2. 绘制手部关键点
+        # 1. 绘制手部关键点
         if hand_result:
             self.draw_hands(frame, hand_result, hands_pos, closest_hand)
 
@@ -159,57 +156,6 @@ class Visualizer:
                             overlay = frame.copy()
                             cv2.circle(overlay, (p_x, p_y), 15, (255, 0, 255), -1) # 紫色实心圆
                             cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-
-    def _draw_roi_and_info(self, frame, roi_info, tracker):
-        h, w = frame.shape[:2]
-        rx, ry, rw, rh, _ = roi_info
-        
-        # 1. 绘制 ROI 矩形
-        if rw < w or rh < h:
-            cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 1)
-
-        # 2. 准备显示信息
-        # Line 1: PD and Head Pos
-        if tracker.current_pixel_dist > 0:
-            if tracker.current_estimated_dist > 200:
-                head_text = "Too far!"
-            else:
-                head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
-        else:
-            head_text = ""
-
-        # Line 2: Gaze Info
-        if self.cached_viz_data['text'] is not None:
-            gaze_text = self.cached_viz_data['text']
-        else:
-            gaze_text = "Gaze: N/A"
-            
-        # 3. 计算位置并绘制 (右对齐于 ROI 右边缘)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 2
-        line_spacing = 20
-        base_y = ry + rh + 20 # 第一行文字的基准 Y 坐标
-        right_align_x = rx + rw # 右对齐的 X 坐标 (ROI 右边缘)
-        
-        # 绘制第一行
-        if head_text:
-            (text_w, text_h), _ = cv2.getTextSize(head_text, font, font_scale, thickness)
-            text_x = right_align_x - text_w
-            # 防止文字超出左边界
-            if text_x < 10: text_x = 10
-            
-            cv2.putText(frame, head_text, (text_x, base_y), font, font_scale, (0, 0, 255), thickness)
-            base_y += line_spacing
-
-        # 绘制第二行
-        if gaze_text:
-            color = self.cached_viz_data['text_color'] if self.cached_viz_data['text_color'] else (255, 0, 255)
-            (text_w, text_h), _ = cv2.getTextSize(gaze_text, font, font_scale, thickness)
-            text_x = right_align_x - text_w
-            if text_x < 10: text_x = 10
-            
-            cv2.putText(frame, gaze_text, (text_x, base_y), font, font_scale, color, thickness)
 
     def _draw_iris(self, frame, eye_points, raw_eye_points):
         # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)

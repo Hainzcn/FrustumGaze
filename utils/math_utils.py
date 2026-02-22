@@ -51,25 +51,6 @@ class OneEuroFilter:
         self.t_prev = t
         return x_hat
 
-class SimpleKalmanFilter:
-    def __init__(self, measurement_noise=0.1, process_noise=0.01):
-        self.kalman = cv2.KalmanFilter(4, 2) # 4 state vars (x, y, dx, dy), 2 measurement vars (x, y)
-        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0],
-                                                  [0, 1, 0, 0]], np.float32)
-        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0],
-                                                 [0, 1, 0, 1],
-                                                 [0, 0, 1, 0],
-                                                 [0, 0, 0, 1]], np.float32)
-        self.kalman.processNoiseCov = np.eye(4, dtype=np.float32) * process_noise
-        self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
-        self.kalman.errorCovPost = np.eye(4, dtype=np.float32)
-
-    def update(self, x, y):
-        measurement = np.array([[np.float32(x)], [np.float32(y)]])
-        self.kalman.correct(measurement)
-        prediction = self.kalman.predict()
-        return prediction[0][0], prediction[1][0]
-
 class Simple3DKalmanFilter:
     def __init__(self, measurement_noise=0.1, process_noise=0.01):
         # 6 state vars (x, y, z, dx, dy, dz), 3 measurement vars (x, y, z)
@@ -93,12 +74,26 @@ class Simple3DKalmanFilter:
         prediction = self.kalman.predict()
         return prediction[0][0], prediction[1][0], prediction[2][0]
 
+class OneDKalmanFilter:
+    def __init__(self, Q=1e-5, R=0.01):
+        self.kf = cv2.KalmanFilter(2, 1)
+        self.kf.measurementMatrix = np.array([[1, 0]], np.float32)
+        self.kf.transitionMatrix = np.array([[1, 1], [0, 1]], np.float32)
+        # 过程噪声协方差 (Q) - 预测不确定性
+        self.kf.processNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * Q
+        # 测量噪声协方差 (R) - 测量不确定性
+        self.kf.measurementNoiseCov = np.array([[1]], np.float32) * R
+        self.kf.statePost = np.array([[0], [0]], np.float32)
+        self.first_run = True
 
-def calculate_single_eye_gaze(eye_points, eye_model, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=12.0):
-    """
-    占位符，如果需要从 visualizer.py 迁移相关逻辑，可在此实现。
-    """
-    pass
+    def update(self, measurement):
+        if self.first_run:
+            self.kf.statePost = np.array([[measurement], [0]], np.float32)
+            self.first_run = False
+        
+        self.kf.predict()
+        self.kf.correct(np.array([[measurement]], np.float32))
+        return self.kf.statePost[0][0]
 
 def calculate_screen_intersection(eye_pos, gaze_vec, z_plane=0.0):
     """
