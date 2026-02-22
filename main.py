@@ -290,7 +290,8 @@ def main():
                                 'rvec': rvec,
                                 'tvec': tvec,
                                 'cam_matrix': cam_matrix,
-                                'dist_coeffs': dist_coeffs
+                                'dist_coeffs': dist_coeffs,
+                                'rmat': results.get('rmat')
                             }
 
                         try:

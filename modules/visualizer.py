@@ -16,6 +16,12 @@ class Visualizer:
         }
         self.render_counter = 0 # 渲染计数器，用于控制频率
         
+        # 字体与绘制参数
+        self.FONT = cv2.FONT_HERSHEY_SIMPLEX
+        self.FONT_SCALE_INFO = 0.6
+        self.FONT_SCALE_TEXT = 0.5
+        self.FONT_THICKNESS = 2
+        
         # 定义手部连接关系
         self.HAND_CONNECTIONS = [
             (0, 1), (1, 2), (2, 3), (3, 4),
@@ -54,7 +60,8 @@ class Visualizer:
                     eye_points, 
                     gaze_data['cam_matrix'], 
                     gaze_data['dist_coeffs'],
-                    tracker
+                    tracker,
+                    rmat=gaze_data.get('rmat')
                 )
         
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
@@ -66,24 +73,35 @@ class Visualizer:
 
     def draw_hands(self, frame, hand_result, hands_pos=None, closest_hand=None):
         """
-        绘制手部关键点
+        绘制手部关键点 (已优化)
         """
         if not hand_result or not hand_result.multi_hand_landmarks:
             return
 
-        h, w, _ = frame.shape
+        h, w = frame.shape[:2]
+        
+        # 优化: 预处理 hands_pos 为字典 O(1) 查找
+        hands_pos_map = {}
+        if hands_pos:
+            hands_pos_map = {p['id']: p for p in hands_pos}
         
         for idx, hand_landmarks_lite in enumerate(hand_result.multi_hand_landmarks):
             # 获取该手的捏起状态
             is_pinching = False
             pinch_pos = (0,0,0)
             pinch_center_2d = (0,0)
-            if hands_pos:
-                hand_pos = next((p for p in hands_pos if p['id'] == idx), None)
-                if hand_pos:
-                    is_pinching = hand_pos.get('is_pinching', False)
-                    pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
-                    pinch_center_2d = hand_pos.get('pinch_center_2d', (0,0))
+            
+            # 优化: 直接字典查找
+            hand_pos = hands_pos_map.get(idx)
+            if hand_pos:
+                is_pinching = hand_pos.get('is_pinching', False)
+                pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
+                pinch_center_2d = hand_pos.get('pinch_center_2d', (0,0))
+
+            # 优化: 预计算所有关键点像素坐标，避免重复 float->int 转换和乘法
+            landmarks_px = []
+            for lm in hand_landmarks_lite:
+                landmarks_px.append((int(lm.x * w), int(lm.y * h)))
 
             # Draw connections
             for connection in self.HAND_CONNECTIONS:
@@ -91,12 +109,9 @@ class Visualizer:
                 end_idx = connection[1]
                 
                 # 确保索引不越界
-                if start_idx < len(hand_landmarks_lite) and end_idx < len(hand_landmarks_lite):
-                    start_point = hand_landmarks_lite[start_idx]
-                    end_point = hand_landmarks_lite[end_idx]
-                    
-                    x1, y1 = int(start_point.x * w), int(start_point.y * h)
-                    x2, y2 = int(end_point.x * w), int(end_point.y * h)
+                if start_idx < len(landmarks_px) and end_idx < len(landmarks_px):
+                    start_point = landmarks_px[start_idx]
+                    end_point = landmarks_px[end_idx]
                     
                     # 确定颜色
                     color = (0, 255, 0) # 默认绿色
@@ -105,57 +120,71 @@ class Visualizer:
                     elif closest_hand and closest_hand['id'] == idx:
                         color = (0, 165, 255) # 最近的手为橙色 (如果不捏起)
                         
-                    cv2.line(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.line(frame, start_point, end_point, color, 2)
                 
             # Draw landmarks
-            for landmark in hand_landmarks_lite:
-                x, y = int(landmark.x * w), int(landmark.y * h)
-                
+            for px_point in landmarks_px:
                 point_color = (0, 0, 255) # 默认点外圈红色
                 if is_pinching:
                     point_color = (0, 0, 255) # 捏起时保持红色
                 
-                cv2.circle(frame, (x, y), 4, point_color, -1)
-                cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
+                cv2.circle(frame, px_point, 4, point_color, -1)
+                cv2.circle(frame, px_point, 2, (255, 255, 255), -1)
             
             # Draw 3D Position Text
-            if hands_pos:
-                # Find pos for this hand
-                hand_pos = next((p for p in hands_pos if p['id'] == idx), None)
-                if hand_pos:
-                    # 在手腕位置显示坐标
-                    wrist = hand_landmarks_lite[0]
-                    wx, wy = int(wrist.x * w), int(wrist.y * h)
-                    
-                    # 格式化: X, Y, Z (cm)
-                    # 注意：我们计算的是 meters, 转换为 cm
-                    # 计算像素距离 (PD) = w_norm * frame_width (近似)
-                    pd_val = hand_pos.get('w_norm', 0) * w
-                    text = f"PD:{pd_val:.0f}px X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f}cm"
-                    
-                    text_color = (0, 255, 0)
-                    if is_pinching:
-                        text_color = (0, 0, 255)
-                    elif closest_hand and closest_hand['id'] == idx:
-                        text_color = (0, 165, 255)
-                        text += " (Closest)"
-                    
-                    cv2.putText(frame, text, (wx, wy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
-                    
-                    # 显示 Yaw 角
-                    yaw_val = hand_pos.get('yaw', 0.0)
-                    yaw_text = f"Yaw: {yaw_val:.1f} deg"
-                    cv2.putText(frame, yaw_text, (wx, wy + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
-                    
-                    # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
-                    if is_pinching:
-                        # 绘制捏起点半透明圆
-                        cx, cy = pinch_center_2d
-                        if cx > 0 and cy > 0:
-                            p_x, p_y = int(cx * w), int(cy * h)
-                            overlay = frame.copy()
-                            cv2.circle(overlay, (p_x, p_y), 15, (255, 0, 255), -1) # 紫色实心圆
-                            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+            if hand_pos:
+                # 在手腕位置显示坐标
+                wx, wy = landmarks_px[0]
+                
+                # 格式化: X, Y, Z (cm)
+                # 注意：我们计算的是 meters, 转换为 cm
+                # 计算像素距离 (PD) = w_norm * frame_width (近似)
+                pd_val = hand_pos.get('w_norm', 0) * w
+                text = f"PD:{pd_val:.0f}px X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f}cm"
+                
+                text_color = (0, 255, 0)
+                if is_pinching:
+                    text_color = (0, 0, 255)
+                elif closest_hand and closest_hand['id'] == idx:
+                    text_color = (0, 165, 255)
+                    text += " (Closest)"
+                
+                # 优化: 使用常量字体参数
+                cv2.putText(frame, text, (wx, wy + 20), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
+                
+                # 显示 Yaw 角
+                yaw_val = hand_pos.get('yaw', 0.0)
+                yaw_text = f"Yaw: {yaw_val:.1f} deg"
+                cv2.putText(frame, yaw_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
+                
+                # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
+                if is_pinching:
+                    # 绘制捏起点半透明圆
+                    cx, cy = pinch_center_2d
+                    if cx > 0 and cy > 0:
+                        p_x, p_y = int(cx * w), int(cy * h)
+                        radius = 15
+                        
+                        # 优化: 使用 ROI 混合替代全帧拷贝
+                        # 计算 ROI 边界，注意不要越界
+                        x1 = max(0, p_x - radius)
+                        y1 = max(0, p_y - radius)
+                        x2 = min(w, p_x + radius)
+                        y2 = min(h, p_y + radius)
+                        
+                        # 只有当 ROI 有效时才绘制
+                        if x2 > x1 and y2 > y1:
+                            roi = frame[y1:y2, x1:x2]
+                            overlay = roi.copy()
+                            
+                            # 在 ROI 局部坐标系中绘制
+                            # 圆心在 ROI 中的坐标
+                            local_center = (p_x - x1, p_y - y1)
+                            cv2.circle(overlay, local_center, radius, (255, 0, 255), -1) # 紫色实心圆
+                            
+                            # 混合并写回原图
+                            cv2.addWeighted(overlay, 0.5, roi, 0.5, 0, roi)
+                            frame[y1:y2, x1:x2] = roi
 
     def _draw_iris(self, frame, eye_points, raw_eye_points):
         # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
@@ -170,7 +199,7 @@ class Visualizer:
             cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1, cv2.LINE_AA)
 
-    def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, tracker):
+    def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, tracker, rmat=None):
         # 获取虹膜 2D 坐标
         if len(eye_points) < 2:
             return
@@ -180,10 +209,10 @@ class Visualizer:
         
         # 计算左右眼视线
         l_gaze_vec, l_eye_center_cam = tracker.calculate_single_eye_gaze(
-            left_iris_2d, LEFT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS
+            left_iris_2d, LEFT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS, rmat=rmat
         )
         r_gaze_vec, r_eye_center_cam = tracker.calculate_single_eye_gaze(
-            right_iris_2d, RIGHT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS
+            right_iris_2d, RIGHT_EYE_CENTER_MODEL, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS, rmat=rmat
         )
         
         # --- 计算视线与屏幕平面 (Z=0) 的交点 ---
@@ -246,7 +275,7 @@ class Visualizer:
         if drop_rate > 0.3: drop_color = (0, 0, 255) # Red
         
         info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%"
-        cv2.putText(frame, info_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, drop_color, 2)
+        cv2.putText(frame, info_text, (10, 25), self.FONT, self.FONT_SCALE_INFO, drop_color, self.FONT_THICKNESS)
         
         # 绘制头部位置信息
         if tracker.current_pixel_dist > 0:
@@ -254,23 +283,23 @@ class Visualizer:
                 head_text = "Too far!"
             else:
                 head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
-            cv2.putText(frame, head_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            cv2.putText(frame, head_text, (10, 50), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
             
             # 显示 Head Yaw
             # Tracker 中应该存储了 yaw
             if hasattr(tracker, 'current_yaw'):
                  yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
-                 cv2.putText(frame, yaw_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                 cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
 
         # 绘制视线交点信息
         if self.cached_viz_data['text'] is not None:
              gaze_text = self.cached_viz_data['text']
              color = self.cached_viz_data['text_color']
-             cv2.putText(frame, gaze_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+             cv2.putText(frame, gaze_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
 
         # 绘制主视眼标记（黄色圆圈 + 'R'）
         if tracker.dominant_eye_pos is not None:
             dx, dy = tracker.dominant_eye_pos
             if 0 <= dx < w and 0 <= dy < h:
                 cv2.circle(frame, (dx, dy), 8, (0, 255, 255), 2)
-                cv2.putText(frame, "R", (dx + 10, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                cv2.putText(frame, "R", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)

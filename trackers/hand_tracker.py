@@ -205,7 +205,7 @@ class HandProcessorProcess(multiprocessing.Process):
             
         return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None):
+    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None):
         """
         计算手部空间位置 (Camera Space)
         使用 PnP 解算
@@ -269,14 +269,15 @@ class HandProcessorProcess(multiprocessing.Process):
         ], dtype="double")
         
         # Camera Matrix
-        # fx = fy = (w / 2) / tan(fov / 2)
-        focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
-        center = (frame_width / 2.0, frame_height / 2.0)
-        camera_matrix = np.array(
-            [[focal_length, 0, center[0]],
-             [0, focal_length, center[1]],
-             [0, 0, 1]], dtype="double"
-        )
+        if camera_matrix is None:
+            # fx = fy = (w / 2) / tan(fov / 2)
+            focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
+            center = (frame_width / 2.0, frame_height / 2.0)
+            camera_matrix = np.array(
+                [[focal_length, 0, center[0]],
+                 [0, focal_length, center[1]],
+                 [0, 0, 1]], dtype="double"
+            )
         dist_coeffs = np.zeros((4, 1)) # Assuming no distortion
         
         # 使用 IPPE 方法解决 PnP (需要 4 个共面点)
@@ -456,14 +457,19 @@ class HandProcessorProcess(multiprocessing.Process):
             }
         }
 
+        # 初始化缓存
+        cached_dims = (0, 0)
+        cached_camera_matrix = None
+
         while not self.stop_event.is_set():
             try:
                 # 阻塞等待任务
-                task = self.input_queue.get(timeout=0.01)
+                task = self.input_queue.get(timeout=0.1)
                 frame_id = task['frame_id']
                 
                 # 从共享内存复制图像数据
-                frame = shm_array.copy()
+                # 优化：直接使用共享内存，避免全量拷贝
+                frame = shm_array
                 
                 # 降分辨率处理
                 h, w = frame.shape[:2]
@@ -471,6 +477,17 @@ class HandProcessorProcess(multiprocessing.Process):
                 target_h = 720
                 scale = target_h / float(h)
                 target_w = int(w * scale)
+                
+                # 优化：预计算/缓存相机矩阵
+                if (target_w, target_h) != cached_dims:
+                    focal_length = (target_w / 2.0) / math.tan(math.radians(self.fov) / 2.0)
+                    center = (target_w / 2.0, target_h / 2.0)
+                    cached_camera_matrix = np.array(
+                        [[focal_length, 0, center[0]],
+                         [0, focal_length, center[1]],
+                         [0, 0, 1]], dtype="double"
+                    )
+                    cached_dims = (target_w, target_h)
                 
                 processed_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 processed_rgb = cv2.resize(processed_rgb, (target_w, target_h))
@@ -517,7 +534,7 @@ class HandProcessorProcess(multiprocessing.Process):
                                     pos_filter = self.hand_filters[label]['pos']
                                     # 检查是否有 OneEuroFilter 字典用于关键点滤波
                                     if 'landmarks' not in self.hand_filters[label]:
-                                         self.hand_filters[label]['landmarks'] = {}
+                                        self.hand_filters[label]['landmarks'] = {}
                                     one_euro_filter_dict = self.hand_filters[label]['landmarks']
                         
                         x, y, z, w_norm, yaw = self._calculate_hand_pos(
@@ -525,7 +542,8 @@ class HandProcessorProcess(multiprocessing.Process):
                             w_norm_filter=w_norm_filter, 
                             pos_filter=pos_filter, 
                             one_euro_filter_dict=one_euro_filter_dict,
-                            timestamp=timestamp_ms / 1000.0
+                            timestamp=timestamp_ms / 1000.0,
+                            camera_matrix=cached_camera_matrix
                         )
                         
                         if x is not None:

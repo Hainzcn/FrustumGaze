@@ -38,11 +38,14 @@ class EyeTracker:
         self.current_yaw = 0.0
         # 保持当前距离值直到计算出新值以避免闪烁
 
-    def _get_filter(self, name, value, min_cutoff=settings.FACE_DIST_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_DIST_ONE_EURO_BETA, d_cutoff=settings.FACE_DIST_ONE_EURO_D_CUTOFF):
-        current_time = time.time()
-        if name not in self.filters:
-            self.filters[name] = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
-        return self.filters[name].filter(value, current_time)
+    def _get_filter(self, name, value, current_time, min_cutoff=settings.FACE_DIST_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_DIST_ONE_EURO_BETA, d_cutoff=settings.FACE_DIST_ONE_EURO_D_CUTOFF):
+        # 优化：使用 current_time 参数，避免重复调用 time.time()
+        # 优化：减少字典查找开销
+        f = self.filters.get(name)
+        if f is None:
+            f = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
+            self.filters[name] = f
+        return f.filter(value, current_time)
 
     def filter_eye_points(self, eye_points):
         """
@@ -55,10 +58,12 @@ class EyeTracker:
         lx, ly = eye_points[0]
         rx, ry = eye_points[1]
 
-        f_lx = self._get_filter('lx', lx)
-        f_ly = self._get_filter('ly', ly)
-        f_rx = self._get_filter('rx', rx)
-        f_ry = self._get_filter('ry', ry)
+        current_time = time.time()
+
+        f_lx = self._get_filter('lx', lx, current_time)
+        f_ly = self._get_filter('ly', ly, current_time)
+        f_rx = self._get_filter('rx', rx, current_time)
+        f_ry = self._get_filter('ry', ry, current_time)
         
         self.filters_initialized = True
         
@@ -77,11 +82,12 @@ class EyeTracker:
 
     def _extract_landmark_point(self, landmarks, idx, w, h):
         """Extracts a specific landmark point and converts to pixel coordinates."""
-        try:
+        # 优化：移除 try-except (假设 MediaPipe 输出结构稳定)
+        # 优化：返回 tuple 而非 np.array，减少内存分配
+        if idx < len(landmarks):
             point = landmarks[idx]
-            return np.array([point.x * w, point.y * h])
-        except (IndexError, AttributeError):
-            return None
+            return (point.x * w, point.y * h)
+        return None
 
     def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov, cam_matrix, dist_coeffs):
         """
@@ -89,6 +95,7 @@ class EyeTracker:
         Returns a dictionary with results.
         """
         w, h = frame_width, frame_height
+        current_time = time.time() # 优化：一次获取时间戳
         
         # 1. Extract and Filter Points of Interest
         # Iris
@@ -108,30 +115,31 @@ class EyeTracker:
 
         # Apply OneEuro Filter to all points
         # Using specific keys for each coordinate
-        f_iris_l = np.array([self._get_filter('iris_lx', iris_l[0]), self._get_filter('iris_ly', iris_l[1])])
-        f_iris_r = np.array([self._get_filter('iris_rx', iris_r[0]), self._get_filter('iris_ry', iris_r[1])])
+        f_iris_l = (self._get_filter('iris_lx', iris_l[0], current_time), self._get_filter('iris_ly', iris_l[1], current_time))
+        f_iris_r = (self._get_filter('iris_rx', iris_r[0], current_time), self._get_filter('iris_ry', iris_r[1], current_time))
         
-        f_inner_l = np.array([self._get_filter('inner_lx', inner_l[0]), self._get_filter('inner_ly', inner_l[1])])
-        f_inner_r = np.array([self._get_filter('inner_rx', inner_r[0]), self._get_filter('inner_ry', inner_r[1])])
+        f_inner_l = (self._get_filter('inner_lx', inner_l[0], current_time), self._get_filter('inner_ly', inner_l[1], current_time))
+        f_inner_r = (self._get_filter('inner_rx', inner_r[0], current_time), self._get_filter('inner_ry', inner_r[1], current_time))
         
-        f_outer_l = np.array([self._get_filter('outer_lx', outer_l[0]), self._get_filter('outer_ly', outer_l[1])])
-        f_outer_r = np.array([self._get_filter('outer_rx', outer_r[0]), self._get_filter('outer_ry', outer_r[1])])
+        f_outer_l = (self._get_filter('outer_lx', outer_l[0], current_time), self._get_filter('outer_ly', outer_l[1], current_time))
+        f_outer_r = (self._get_filter('outer_rx', outer_r[0], current_time), self._get_filter('outer_ry', outer_r[1], current_time))
         
         # Format for return and legacy support
-        eye_points = [(f_iris_l[0], f_iris_l[1]), (f_iris_r[0], f_iris_r[1])]
-        raw_eye_points = [(iris_l[0], iris_l[1]), (iris_r[0], iris_r[1])]
+        eye_points = [f_iris_l, f_iris_r]
+        raw_eye_points = [iris_l, iris_r]
 
         # 2. Calculate Distance (using filtered inner/outer eye corners)
-        d_inner_px = np.linalg.norm(f_inner_l - f_inner_r)
-        d_outer_px = np.linalg.norm(f_outer_l - f_outer_r)
+        # 优化：避免创建不必要的 np.array，直接计算欧几里得距离
+        d_inner_px = math.sqrt((f_inner_l[0] - f_inner_r[0])**2 + (f_inner_l[1] - f_inner_r[1])**2)
+        d_outer_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
         
         # Real distances (cm)
         D_INNER_REAL = 4.0
         D_OUTER_REAL = 9.0
         
-        # Focal length calculation
+        # Focal length calculation (优化：计算一次，传递给 update_offset)
         fov_rad = math.radians(camera_fov)
-        focal_length = (w / 2) / math.tan(fov_rad / 2)
+        focal_length = (w / 2.0) / math.tan(fov_rad / 2.0)
         
         # Estimate depth
         z_inner = (D_INNER_REAL * focal_length) / d_inner_px if d_inner_px > 0 else 0
@@ -151,7 +159,8 @@ class EyeTracker:
         # Using raw points for PnP as it usually benefits from raw data, 
         # but we could use filtered points if we filtered all mesh points (too expensive).
         # We'll use the specific PnP logic here.
-        pitch, yaw, roll, rvec, tvec = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs)
+        # 优化：传递 current_time
+        pitch, yaw, roll, rvec, tvec, rmat = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, current_time)
         
         # 4. Apply correction and filtering
         correction_factor = math.cos(math.radians(yaw))
@@ -164,7 +173,8 @@ class EyeTracker:
         self.current_estimated_dist = filtered_estimated
         
         # 5. Update offset
-        self.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated, camera_fov)
+        # 优化：传递已计算的 focal_length，避免重复计算
+        self.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated, focal_length=focal_length)
         
         # 记录 Yaw 以便可视化
         self.current_yaw = yaw
@@ -176,10 +186,11 @@ class EyeTracker:
             'tvec': tvec,
             'yaw': yaw,
             'pitch': pitch,
-            'roll': roll
+            'roll': roll,
+            'rmat': rmat
         }
 
-    def _calculate_head_pose(self, face_landmarks, w, h, cam_matrix, dist_coeffs):
+    def _calculate_head_pose(self, face_landmarks, w, h, cam_matrix, dist_coeffs, current_time):
         """Calculates head pose using PnP and verifies with Reprojection Error."""
         # 2D 图像点 (使用 MediaPipe 关键点索引)
         # 1: Nose Tip, 152: Chin, 33: Left Eye Outer, 263: Right Eye Outer, 
@@ -187,55 +198,52 @@ class EyeTracker:
         # 362: Right Eye Inner, 70: Left Eyebrow Outer, 300: Right Eyebrow Outer, 2: Nose Bottom
         indices = [1, 152, 33, 263, 61, 291, 133, 362, 70, 300, 2]
         
-        # 定义关键点对应的 filter 名称 (保持一致性)
-        # 注意：process_landmarks 中只对部分关键点做了 filter，这里如果想用 filter 后的数据，
-        # 需要确保这些点也都经过了 OneEuroFilter。
-        # 为了简单且一致，我们在 _get_filter 中自动处理未初始化的 filter。
+        # 优化：预分配 numpy 数组，避免循环 append
+        image_points = np.empty((len(indices), 2), dtype=np.float64)
         
-        image_points = []
-        for idx in indices:
+        for i, idx in enumerate(indices):
             pt = self._extract_landmark_point(face_landmarks, idx, w, h)
             if pt is None:
-                return 0, 0, 0, None, None
+                return 0, 0, 0, None, None, None
             
             # --- 应用 OneEuroFilter ---
             # 使用唯一键名，例如 "lm_1_x", "lm_1_y"
             # 使用 Head Pose 专用的滤波参数 (通常需要更平滑)
             filtered_x = self._get_filter(
-                f'lm_{idx}_x', pt[0], 
+                f'lm_{idx}_x', pt[0], current_time,
                 min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
                 beta=settings.FACE_POS_ONE_EURO_BETA,
                 d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
             )
             filtered_y = self._get_filter(
-                f'lm_{idx}_y', pt[1],
+                f'lm_{idx}_y', pt[1], current_time,
                 min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
                 beta=settings.FACE_POS_ONE_EURO_BETA,
                 d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
             )
             
-            image_points.append([filtered_x, filtered_y])
+            image_points[i] = [filtered_x, filtered_y]
             
-        image_points = np.array(image_points, dtype="double")
-        
         # PnP 求解
         (success, rotation_vector, translation_vector) = cv2.solvePnP(MODEL_POINTS, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_EPNP)
     
         if not success:
-            return 0, 0, 0, None, None
+            return 0, 0, 0, None, None, None
 
         # --- 验证逻辑: 计算重投影误差 ---
+        # 这一步开销不小，如果性能敏感可以考虑去掉或者降频执行
         projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
         error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
         
         # 计算欧拉角
+        # 优化：返回 rmat 供复用
         rmat, jac = cv2.Rodrigues(rotation_vector)
         angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
         
         # angles[0]=pitch, angles[1]=yaw, angles[2]=roll
-        return angles[0], angles[1], angles[2], rotation_vector, translation_vector
+        return angles[0], angles[1], angles[2], rotation_vector, translation_vector, rmat
 
-    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=60.0):
+    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=60.0, rmat=None):
         """
         计算单眼视线向量
         :param iris_center_2d: (x, y) 像素坐标
@@ -243,10 +251,14 @@ class EyeTracker:
         :param rvec: 头部旋转向量
         :param tvec: 头部平移向量
         :param cam_matrix: 相机内参
+        :param rmat: 可选，预计算的旋转矩阵
         :return: (gaze_vector_3d, eye_center_cam_3d) 相机坐标系下的视线向量和眼球中心
         """
         # 1. 将眼球中心变换到相机坐标系
-        rmat, _ = cv2.Rodrigues(rvec)
+        # 优化：复用 rmat
+        if rmat is None:
+            rmat, _ = cv2.Rodrigues(rvec)
+            
         eye_center_cam = np.dot(rmat, eye_center_model_3d) + tvec.reshape(3)
         
         # 2. 将虹膜 2D 点反投影为射线 (相机坐标系)
@@ -298,7 +310,7 @@ class EyeTracker:
         return gaze_vector, eye_center_cam
 
 
-    def update_offset(self, eye_points, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0):
+    def update_offset(self, eye_points, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0, focal_length=None):
         """
         计算并更新右眼（画面左侧）相对于摄像机光轴的物理偏移
         采用针孔成像模型 (Pinhole Camera Model):
@@ -329,13 +341,18 @@ class EyeTracker:
         cy = frame_height / 2.0
         
         # 焦距 (Focal Length) fx, fy
-        # 假设像素是正方形 (square pixels)，即 fx = fy
-        # 使用与 calculate_distance 一致的 FOV = 60度 计算焦距
-        fov_rad = math.radians(fov)
-        # tan(fov/2) = (w/2) / f  =>  f = (w/2) / tan(fov/2)
-        f = (frame_width / 2.0) / math.tan(fov_rad / 2.0)
-        fx = f
-        fy = f
+        # 优化：优先使用传入的 focal_length
+        if focal_length is not None:
+            fx = focal_length
+            fy = focal_length
+        else:
+            # 假设像素是正方形 (square pixels)，即 fx = fy
+            # 使用与 calculate_distance 一致的 FOV = 60度 计算焦距
+            fov_rad = math.radians(fov)
+            # tan(fov/2) = (w/2) / f  =>  f = (w/2) / tan(fov/2)
+            f = (frame_width / 2.0) / math.tan(fov_rad / 2.0)
+            fx = f
+            fy = f
         
         # 3. 获取深度 Z (cm)
         Z = real_dist_cm
