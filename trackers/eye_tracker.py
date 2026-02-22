@@ -3,7 +3,8 @@ import cv2
 import time
 import math
 import numpy as np
-from modules.filters import OneEuroFilter, OneDKalmanFilter
+from modules.filters import OneDKalmanFilter
+from utils.math_utils import OneEuroFilter
 from config.settings import MODEL_POINTS
 import config.settings as settings
 
@@ -13,6 +14,9 @@ class EyeTracker:
         self.current_estimated_dist = 0
         self.current_offset_x = 0
         self.current_offset_y = 0
+        
+        # 记录 Yaw 以便可视化
+        self.current_yaw = 0.0
         
         # 初始化距离平滑卡尔曼滤波器（二级层）
         self.pixel_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
@@ -32,14 +36,14 @@ class EyeTracker:
         self.dominant_eye_pos = None
         self.filters = {}
         self.filters_initialized = False
+        self.current_yaw = 0.0
         # 保持当前距离值直到计算出新值以避免闪烁
 
-    def _get_filter(self, name, value, min_cutoff=settings.FACE_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_ONE_EURO_BETA):
+    def _get_filter(self, name, value, min_cutoff=settings.FACE_DIST_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_DIST_ONE_EURO_BETA, d_cutoff=settings.FACE_DIST_ONE_EURO_D_CUTOFF):
         current_time = time.time()
         if name not in self.filters:
-            self.filters[name] = OneEuroFilter(current_time, value, min_cutoff=min_cutoff, beta=beta, d_cutoff=settings.FACE_ONE_EURO_D_CUTOFF)
-            return value
-        return self.filters[name].filter(current_time, value)
+            self.filters[name] = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
+        return self.filters[name].filter(value, current_time)
 
     def filter_eye_points(self, eye_points):
         """
@@ -163,6 +167,9 @@ class EyeTracker:
         # 5. Update offset
         self.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated, camera_fov)
         
+        # 记录 Yaw 以便可视化
+        self.current_yaw = yaw
+        
         return {
             'eye_points': eye_points,
             'raw_eye_points': raw_eye_points,
@@ -181,12 +188,34 @@ class EyeTracker:
         # 362: Right Eye Inner, 70: Left Eyebrow Outer, 300: Right Eyebrow Outer, 2: Nose Bottom
         indices = [1, 152, 33, 263, 61, 291, 133, 362, 70, 300, 2]
         
+        # 定义关键点对应的 filter 名称 (保持一致性)
+        # 注意：process_landmarks 中只对部分关键点做了 filter，这里如果想用 filter 后的数据，
+        # 需要确保这些点也都经过了 OneEuroFilter。
+        # 为了简单且一致，我们在 _get_filter 中自动处理未初始化的 filter。
+        
         image_points = []
         for idx in indices:
             pt = self._extract_landmark_point(face_landmarks, idx, w, h)
             if pt is None:
                 return 0, 0, 0, None, None
-            image_points.append(pt)
+            
+            # --- 应用 OneEuroFilter ---
+            # 使用唯一键名，例如 "lm_1_x", "lm_1_y"
+            # 使用 Head Pose 专用的滤波参数 (通常需要更平滑)
+            filtered_x = self._get_filter(
+                f'lm_{idx}_x', pt[0], 
+                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
+                beta=settings.FACE_POS_ONE_EURO_BETA,
+                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
+            )
+            filtered_y = self._get_filter(
+                f'lm_{idx}_y', pt[1],
+                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
+                beta=settings.FACE_POS_ONE_EURO_BETA,
+                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
+            )
+            
+            image_points.append([filtered_x, filtered_y])
             
         image_points = np.array(image_points, dtype="double")
         

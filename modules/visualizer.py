@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 # import mediapipe as mp # 移除 mediapipe 导入，避免 AttributeError
-from config.settings import LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH
+from config.settings import LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH, GAZE_RENDER_INTERVAL
 from utils.math_utils import calculate_screen_intersection, calculate_weighted_average
 
 class Visualizer:
@@ -14,6 +14,8 @@ class Visualizer:
             'text': None, 'text_color': (255, 0, 255),
             'l_eye_center': None, 'r_eye_center': None
         }
+        self.render_counter = 0 # 渲染计数器，用于控制频率
+        
         # 定义手部连接关系
         self.HAND_CONNECTIONS = [
             (0, 1), (1, 2), (2, 3), (3, 4),
@@ -29,7 +31,7 @@ class Visualizer:
         统一渲染入口
         """
         # 1. 绘制 ROI 和 信息
-        self._draw_roi_and_info(frame, roi_info, tracker)
+        # self._draw_roi_and_info(frame, roi_info, tracker)
 
         # 2. 绘制手部关键点
         if hand_result:
@@ -46,15 +48,18 @@ class Visualizer:
 
         # 3. 更新并绘制视线 (如果有数据)
         if gaze_data:
-            self._update_gaze_viz_with_tracker(
-                gaze_data['rvec'], 
-                gaze_data['tvec'], 
-                eye_points, 
-                gaze_data['cam_matrix'], 
-                gaze_data['dist_coeffs'],
-                tracker
-            )
-
+            self.render_counter += 1
+            if self.render_counter >= GAZE_RENDER_INTERVAL:
+                self.render_counter = 0
+                self._update_gaze_viz_with_tracker(
+                    gaze_data['rvec'], 
+                    gaze_data['tvec'], 
+                    eye_points, 
+                    gaze_data['cam_matrix'], 
+                    gaze_data['dist_coeffs'],
+                    tracker
+                )
+        
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
         self._draw_overlay(frame, tracker, fps, drop_rate)
 
@@ -140,12 +145,13 @@ class Visualizer:
                     
                     cv2.putText(frame, text, (wx, wy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
                     
-                    # 如果捏起，显示指尖位置信息
+                    # 显示 Yaw 角
+                    yaw_val = hand_pos.get('yaw', 0.0)
+                    yaw_text = f"Yaw: {yaw_val:.1f} deg"
+                    cv2.putText(frame, yaw_text, (wx, wy + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
+                    
+                    # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
                     if is_pinching:
-                        px, py, pz = pinch_pos
-                        pinch_text = f"Pinch: X:{px*100:.0f} Y:{py*100:.0f} Z:{pz*100:.0f}cm"
-                        cv2.putText(frame, pinch_text, (wx, wy + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                        
                         # 绘制捏起点半透明圆
                         cx, cy = pinch_center_2d
                         if cx > 0 and cy > 0:
@@ -296,6 +302,26 @@ class Visualizer:
         info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%"
         cv2.putText(frame, info_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, drop_color, 2)
         
+        # 绘制头部位置信息
+        if tracker.current_pixel_dist > 0:
+            if tracker.current_estimated_dist > 200:
+                head_text = "Too far!"
+            else:
+                head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
+            cv2.putText(frame, head_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            
+            # 显示 Head Yaw
+            # Tracker 中应该存储了 yaw
+            if hasattr(tracker, 'current_yaw'):
+                 yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
+                 cv2.putText(frame, yaw_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+        # 绘制视线交点信息
+        if self.cached_viz_data['text'] is not None:
+             gaze_text = self.cached_viz_data['text']
+             color = self.cached_viz_data['text_color']
+             cv2.putText(frame, gaze_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
         # 绘制主视眼标记（黄色圆圈 + 'R'）
         if tracker.dominant_eye_pos is not None:
             dx, dy = tracker.dominant_eye_pos

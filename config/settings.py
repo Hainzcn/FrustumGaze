@@ -8,27 +8,39 @@ VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计
 # 设置为 1 表示每一帧都处理
 EYE_TRACKING_INTERVAL = 1
 HAND_TRACKING_INTERVAL = 1
+GAZE_RENDER_INTERVAL = 1 # 视线线段渲染频率 (每多少帧更新一次)
 
-# Filter Settings (Filtering)
-# Hand OneEuroFilter Parameters (for w_norm / jitter reduction)
-HAND_ONE_EURO_MIN_CUTOFF = 0.5
-HAND_ONE_EURO_BETA = 0.2
-HAND_ONE_EURO_D_CUTOFF = 1.0
+# 滤波器参数设置
+
+# 手部距离一元滤波参数
+HAND_DIST_ONE_EURO_MIN_CUTOFF = 0.5
+HAND_DIST_ONE_EURO_BETA = 0.2
+HAND_DIST_ONE_EURO_D_CUTOFF = 1.0
+
+# Hand OneEuroFilter Parameters (Position/PnP - Landmarks)
+HAND_POS_ONE_EURO_MIN_CUTOFF = 1.0
+HAND_POS_ONE_EURO_BETA = 0.0
+HAND_POS_ONE_EURO_D_CUTOFF = 1.0
 
 # Hand Kalman Filter Parameters (for 3D position smoothing)
 HAND_KALMAN_PROCESS_NOISE = 0.01    # Q: Process noise covariance (trust in model)
 HAND_KALMAN_MEASUREMENT_NOISE = 0.1 # R: Measurement noise covariance (trust in measurement)
 
-# Face/Eye OneEuroFilter Parameters (for landmarks smoothing)
-FACE_ONE_EURO_MIN_CUTOFF = 0.3
-FACE_ONE_EURO_BETA = 0.3
-FACE_ONE_EURO_D_CUTOFF = 1.0
+# 人脸距离一元滤波参数
+FACE_DIST_ONE_EURO_MIN_CUTOFF = 0.3
+FACE_DIST_ONE_EURO_BETA = 0.3
+FACE_DIST_ONE_EURO_D_CUTOFF = 1.0
 
-# Face Distance Kalman Filter Parameters (for depth smoothing)
+# 人脸位置一元滤波参数
+FACE_POS_ONE_EURO_MIN_CUTOFF = 1.0
+FACE_POS_ONE_EURO_BETA = 0.0
+FACE_POS_ONE_EURO_D_CUTOFF = 1.0
+
+# 人脸距离卡尔曼滤波参数
 FACE_DIST_KALMAN_Q = 0.1 # Process Noise (Q)
 FACE_DIST_KALMAN_R = 5.0 # Measurement Noise (R)
 
-# Face Offset Kalman Filter Parameters (for position offset smoothing)
+# 人脸位置偏移卡尔曼滤波参数
 FACE_OFFSET_KALMAN_Q = 0.3 # Process Noise (Q)
 FACE_OFFSET_KALMAN_R = 0.1 # Measurement Noise (R)
 
