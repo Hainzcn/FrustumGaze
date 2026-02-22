@@ -205,9 +205,9 @@ class HandProcessorProcess(multiprocessing.Process):
             py = z_depth * (cy - 0.5) * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
             pz = z_depth # 简化
             
-            return True, px, py, pz
+            return True, px, py, pz, cx, cy
             
-        return False, 0.0, 0.0, 0.0
+        return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
     def _calculate_hand_pos(self, landmarks, aspect_ratio, w_norm_filter=None, pos_filter=None, timestamp=None):
         """
@@ -386,7 +386,7 @@ class HandProcessorProcess(multiprocessing.Process):
                         
                         if x is not None:
                             # 检测 Pinch
-                            is_pinching, px, py, pz = self._detect_pinch(landmarks, z, aspect_ratio)
+                            is_pinching, px, py, pz, pinch_cx, pinch_cy = self._detect_pinch(landmarks, z, aspect_ratio)
                             
                             hand_info = {
                                 'id': idx,
@@ -397,7 +397,8 @@ class HandProcessorProcess(multiprocessing.Process):
                                 'w_norm': w_norm,
                                 'landmarks': landmarks,
                                 'is_pinching': is_pinching,
-                                'pinch_pos': (px, py, pz)
+                                'pinch_pos': (px, py, pz),
+                                'pinch_center_2d': (pinch_cx, pinch_cy)
                             }
                             hands_pos.append(hand_info)
                             

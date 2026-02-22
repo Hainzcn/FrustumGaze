@@ -75,11 +75,13 @@ class Visualizer:
             # 获取该手的捏起状态
             is_pinching = False
             pinch_pos = (0,0,0)
+            pinch_center_2d = (0,0)
             if hands_pos:
                 hand_pos = next((p for p in hands_pos if p['id'] == idx), None)
                 if hand_pos:
                     is_pinching = hand_pos.get('is_pinching', False)
                     pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
+                    pinch_center_2d = hand_pos.get('pinch_center_2d', (0,0))
 
             # Draw connections
             for connection in self.HAND_CONNECTIONS:
@@ -109,7 +111,7 @@ class Visualizer:
                 
                 point_color = (0, 0, 255) # 默认点外圈红色
                 if is_pinching:
-                     point_color = (0, 0, 255) # 捏起时保持红色 (或可加深)
+                    point_color = (0, 0, 255) # 捏起时保持红色
                 
                 cv2.circle(frame, (x, y), 4, point_color, -1)
                 cv2.circle(frame, (x, y), 2, (255, 255, 255), -1)
@@ -136,13 +138,21 @@ class Visualizer:
                         text_color = (0, 165, 255)
                         text += " (Closest)"
                     
-                    cv2.putText(frame, text, (wx, wy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
+                    cv2.putText(frame, text, (wx, wy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
                     
                     # 如果捏起，显示指尖位置信息
                     if is_pinching:
                         px, py, pz = pinch_pos
                         pinch_text = f"Pinch: X:{px*100:.0f} Y:{py*100:.0f} Z:{pz*100:.0f}cm"
-                        cv2.putText(frame, pinch_text, (wx, wy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                        cv2.putText(frame, pinch_text, (wx, wy + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                        
+                        # 绘制捏起点半透明圆
+                        cx, cy = pinch_center_2d
+                        if cx > 0 and cy > 0:
+                            p_x, p_y = int(cx * w), int(cy * h)
+                            overlay = frame.copy()
+                            cv2.circle(overlay, (p_x, p_y), 15, (255, 0, 255), -1) # 紫色实心圆
+                            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
     def _draw_roi_and_info(self, frame, roi_info, tracker):
         h, w = frame.shape[:2]

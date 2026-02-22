@@ -26,10 +26,10 @@ FACE_ONE_EURO_D_CUTOFF = 1.0
 
 # Face Distance Kalman Filter Parameters (for depth smoothing)
 FACE_DIST_KALMAN_Q = 0.1 # Process Noise (Q)
-FACE_DIST_KALMAN_R = 3.0 # Measurement Noise (R)
+FACE_DIST_KALMAN_R = 5.0 # Measurement Noise (R)
 
 # Face Offset Kalman Filter Parameters (for position offset smoothing)
-FACE_OFFSET_KALMAN_Q = 0.1 # Process Noise (Q)
+FACE_OFFSET_KALMAN_Q = 0.3 # Process Noise (Q)
 FACE_OFFSET_KALMAN_R = 0.1 # Measurement Noise (R)
 
 # Network
