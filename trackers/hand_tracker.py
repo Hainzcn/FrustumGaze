@@ -200,10 +200,10 @@ class HandProcessorProcess(multiprocessing.Process):
             cx = sum_x / count
             cy = sum_y / count
             
-            # 计算捏起点空间坐标
-            px = z_depth * (cx - 0.5) * 2.0 * tan_half_fov
-            py = z_depth * (cy - 0.5) * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
-            pz = z_depth # 简化
+            # 计算捏起点空间坐标 (已取消计算，仅返回占位符)
+            px = 0.0
+            py = 0.0
+            pz = 0.0 
             
             return True, px, py, pz, cx, cy
             

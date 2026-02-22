@@ -208,14 +208,10 @@ def main():
                 if latest_closest_hand:
                     is_pinching = 1 if latest_closest_hand.get('is_pinching', False) else 0
                     
-                    if is_pinching:
-                        # 捏起时发送捏起点坐标
-                        hx, hy, hz = latest_closest_hand.get('pinch_pos', (0.0, 0.0, 0.0))
-                    else:
-                        # 未捏起时发送手掌中心坐标
-                        hx = latest_closest_hand.get('x', 0.0)
-                        hy = latest_closest_hand.get('y', 0.0)
-                        hz = latest_closest_hand.get('z', 0.0)
+                    # 无论是否捏起，都发送手掌中心坐标
+                    hx = latest_closest_hand.get('x', 0.0)
+                    hy = latest_closest_hand.get('y', 0.0)
+                    hz = latest_closest_hand.get('z', 0.0)
                     
                     # 格式: H:is_pinching,x,y,z
                     hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f}"
