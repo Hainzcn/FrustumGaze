@@ -102,6 +102,15 @@ def main():
     cam_matrix = camera_model.cam_matrix
     dist_coeffs = camera_model.dist_coeffs
 
+    # 预创建 gaze_data 字典用于复用 (优化点 1)
+    gaze_data_container = {
+        'rvec': None,
+        'tvec': None,
+        'cam_matrix': cam_matrix,
+        'dist_coeffs': dist_coeffs,
+        'rmat': None
+    }
+
     # 初始化 UDP
     udp_sender = UDPSender(UDP_IP, UDP_PORT)
     
@@ -283,16 +292,16 @@ def main():
                         
                         # 准备视线可视化数据
                         if VISUALIZE and rvec is not None and tvec is not None:
-                            latest_gaze_data = {
-                                'rvec': rvec,
-                                'tvec': tvec,
-                                'cam_matrix': cam_matrix,
-                                'dist_coeffs': dist_coeffs,
-                                'rmat': results.get('rmat')
-                            }
+                            # 优化：复用字典对象，仅更新变化的值
+                            gaze_data_container['rvec'] = rvec
+                            gaze_data_container['tvec'] = tvec
+                            gaze_data_container['rmat'] = results.get('rmat')
+                            latest_gaze_data = gaze_data_container
 
                         try:
-                            data_str = f"G:{tracker.current_estimated_dist:.2f},{tracker.current_offset_x:.2f},{tracker.current_offset_y:.2f}"
+                            # 优化：批量读取 tracker 属性
+                            est_dist, off_x, off_y = tracker.get_gaze_params()
+                            data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
                             udp_sender.send(data_str)
                         except Exception as e:
                             print(f"UDP Send Error: {e}")

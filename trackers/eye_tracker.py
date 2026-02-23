@@ -370,3 +370,7 @@ class EyeTracker:
         # 保留浮点数精度
         self.current_offset_x = filtered_x
         self.current_offset_y = filtered_y
+
+    def get_gaze_params(self):
+        """批量获取视线参数，减少属性访问开销"""
+        return self.current_estimated_dist, self.current_offset_x, self.current_offset_y
