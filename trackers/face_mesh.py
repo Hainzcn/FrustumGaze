@@ -9,6 +9,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from modules.shared_mem import get_shared_array
 from utils.image_utils import GlobalImagePreprocessor
+from config import settings
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
@@ -54,15 +55,15 @@ class FrameProcessorProcess(multiprocessing.Process):
         # 2. 初始化 MediaPipe (必须在子进程中进行)
         # 注意：这里假设 model_asset_path 在当前工作目录
         try:
-            base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
+            base_options = python.BaseOptions(model_asset_path=settings.FACE_MESH_TASK_PATH)
             options = vision.FaceLandmarkerOptions(
                 base_options=base_options,
                 output_face_blendshapes=False,
                 output_facial_transformation_matrixes=False,
                 num_faces=1,
-                min_face_detection_confidence=0.5,
-                min_face_presence_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_face_detection_confidence=settings.FACE_MIN_DETECTION_CONFIDENCE,
+                min_face_presence_confidence=settings.FACE_MIN_PRESENCE_CONFIDENCE,
+                min_tracking_confidence=settings.FACE_MIN_TRACKING_CONFIDENCE,
                 running_mode=vision.RunningMode.VIDEO)
             
             detector = vision.FaceLandmarker.create_from_options(options)

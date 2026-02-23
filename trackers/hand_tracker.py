@@ -54,6 +54,50 @@ class HandProcessorProcess(multiprocessing.Process):
         self.frame_shape = frame_shape
         self.fov = fov
         self.daemon = True
+        # ROI 状态: (x_min, y_min, x_max, y_max) 归一化坐标 (0-1)
+        self.roi = None
+        self.roi_miss_count = 0
+        self.MAX_ROI_MISS_COUNT = 30 # 连续多少帧没检测到手重置 ROI
+
+    def _calculate_roi(self, landmarks_list, padding_factor=0.5):
+        """
+        根据当前检测到的手部计算下一帧的 ROI
+        返回: (x_min, y_min, x_max, y_max) 归一化坐标
+        """
+        if not landmarks_list:
+            return None
+            
+        all_x = []
+        all_y = []
+        
+        for landmarks in landmarks_list:
+            for lm in landmarks:
+                all_x.append(lm.x)
+                all_y.append(lm.y)
+                
+        if not all_x:
+            return None
+            
+        x_min, x_max = min(all_x), max(all_x)
+        y_min, y_max = min(all_y), max(all_y)
+        
+        w = x_max - x_min
+        h = y_max - y_min
+        
+        # 扩展边界
+        pad_x = w * padding_factor
+        pad_y = h * padding_factor
+        
+        # 确保 ROI 不过小
+        min_size = 0.2 # 最小占画面 20% ? 不，太大了。如果不扩展可能会太小。
+        # 还是只做 padding 吧。
+        
+        roi_x_min = max(0.0, x_min - pad_x)
+        roi_y_min = max(0.0, y_min - pad_y)
+        roi_x_max = min(1.0, x_max + pad_x)
+        roi_y_max = min(1.0, y_max + pad_y)
+        
+        return (roi_x_min, roi_y_min, roi_x_max, roi_y_max)
 
     def _calculate_bbox(self, landmarks):
         """计算手部边界框 (normalized coordinates)"""
@@ -165,7 +209,7 @@ class HandProcessorProcess(multiprocessing.Process):
         thumb = landmarks[THUMB_TIP]
         
         # 阈值设定: 2cm (0.02m)
-        PINCH_THRESHOLD_M = 0.02 
+        PINCH_THRESHOLD_M = settings.PINCH_THRESHOLD_M
         
         # 转换因子
         tan_half_fov = math.tan(math.radians(self.fov) / 2.0)
@@ -212,7 +256,7 @@ class HandProcessorProcess(multiprocessing.Process):
         使用 PnP 解算
         关键点索引: 0 (Wrist), 5 (Index MCP), 9 (Middle MCP), 13 (Ring MCP), 17 (Pinky MCP)
         模型设定 (以 5-17 连线中点为原点, 使得 PnP 结果直接反映手掌中心位置):
-        - 距离: 0-5=10cm, 5-17=6cm, 0-17=8cm
+        - 距离: 0-5=10cm, 5-17=6cm, 0-17=8cm (默认)
         - 直角三角形, 直角在 17
         - P5:  (0.0, -0.03, 0.0)
         - P9:  (0.0, -0.01, 0.0)
@@ -222,14 +266,18 @@ class HandProcessorProcess(multiprocessing.Process):
         """
         
         # 3D Model Points (Meters)
+        # 根据配置的手掌宽度进行缩放
+        # 默认宽度 6.0cm
+        scale = settings.HAND_PALM_WIDTH_CM / 6.0
+        
         # 为了避免 3 点共线导致 SOLVEPNP_IPPE 失败，对中间手指的 X 坐标进行微调
         # 模拟指关节的自然弧度
         model_points = np.array([
-            (0.08, 0.03, 0.0),     # 0: Wrist
-            (0.0, -0.03, 0.0),     # 5: Index MCP
-            (-0.01, -0.01, 0.0),   # 9: Middle MCP (稍向前突出)
-            (-0.005,  0.01, 0.0),  # 13: Ring MCP (稍向前突出)
-            (0.0,  0.03, 0.0)      # 17: Pinky MCP
+            (0.08 * scale, 0.03 * scale, 0.0),     # 0: Wrist
+            (0.0, -0.03 * scale, 0.0),             # 5: Index MCP
+            (-0.01 * scale, -0.01 * scale, 0.0),   # 9: Middle MCP (稍向前突出)
+            (-0.005 * scale,  0.01 * scale, 0.0),  # 13: Ring MCP (稍向前突出)
+            (0.0,  0.03 * scale, 0.0)              # 17: Pinky MCP
         ], dtype="double")
         
         # --- 应用 OneEuroFilter 滤波 (对关键点) ---
@@ -417,13 +465,13 @@ class HandProcessorProcess(multiprocessing.Process):
 
         # 2. 初始化 MediaPipe Hands (Tasks API)
         try:
-            base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
+            base_options = python.BaseOptions(model_asset_path=settings.HAND_LANDMARKER_TASK_PATH)
             options = vision.HandLandmarkerOptions(
                 base_options=base_options,
                 num_hands=2,
-                min_hand_detection_confidence=0.5,
-                min_hand_presence_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_hand_detection_confidence=settings.HAND_MIN_DETECTION_CONFIDENCE,
+                min_hand_presence_confidence=settings.HAND_MIN_PRESENCE_CONFIDENCE,
+                min_tracking_confidence=settings.HAND_MIN_TRACKING_CONFIDENCE,
                 running_mode=vision.RunningMode.VIDEO)
             detector = vision.HandLandmarker.create_from_options(options)
         except Exception as e:
@@ -493,7 +541,40 @@ class HandProcessorProcess(multiprocessing.Process):
                 processed_rgb = GlobalImagePreprocessor.to_rgb(frame)
                 processed_rgb = GlobalImagePreprocessor.resize_image(processed_rgb, target_size=(target_w, target_h))
                 
-                # 轻量高斯模糊
+                # --- ROI 处理逻辑 ---
+                # 1. 如果有 ROI，裁剪 ROI 区域
+                roi_info = None # (roi_x, roi_y, roi_w, roi_h) in processed_rgb pixel coords
+                if self.roi:
+                    roi_x_min, roi_y_min, roi_x_max, roi_y_max = self.roi
+                    roi_x = int(roi_x_min * target_w)
+                    roi_y = int(roi_y_min * target_h)
+                    roi_w_pixel = int((roi_x_max - roi_x_min) * target_w)
+                    roi_h_pixel = int((roi_y_max - roi_y_min) * target_h)
+                    
+                    # 边界检查
+                    roi_x = max(0, roi_x)
+                    roi_y = max(0, roi_y)
+                    roi_w_pixel = min(target_w - roi_x, roi_w_pixel)
+                    roi_h_pixel = min(target_h - roi_y, roi_h_pixel)
+                    
+                    if roi_w_pixel > 10 and roi_h_pixel > 10: # 确保 ROI 有效
+                        processed_rgb = processed_rgb[roi_y:roi_y+roi_h_pixel, roi_x:roi_x+roi_w_pixel]
+                        roi_info = (roi_x, roi_y, roi_w_pixel, roi_h_pixel)
+                    else:
+                        # ROI 无效，回退到全图
+                        self.roi = None
+                        self.roi_miss_count = 0
+                
+                # 2. 降分辨率处理 (50%)
+                if roi_info:
+                    # 如果使用了 ROI，再降 50%
+                    processed_rgb = cv2.resize(processed_rgb, (0, 0), fx=0.5, fy=0.5)
+                else:
+                    # 如果是全图，保持当前的 720p 缩放 (或者也可以再降，视需求而定，这里保持原逻辑不变)
+                    # 原逻辑已经是 resize 到 target_w, target_h 了
+                    pass
+                
+                # 3. 高斯模糊
                 processed_rgb = cv2.GaussianBlur(processed_rgb, (5, 5), 0)
                 
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
@@ -502,9 +583,60 @@ class HandProcessorProcess(multiprocessing.Process):
                 # MediaPipe 处理
                 detection_result = detector.detect_for_video(mp_image, timestamp_ms)
                 
-                # --- 过滤重叠手部 (新增) ---
+                # --- 坐标映射回全图 ---
+                # MediaPipe 返回的是归一化坐标 (相对于输入图像 processed_rgb)
+                # 如果使用了 ROI + Resize，需要逆变换
+                
+                mapped_landmarks_list = []
+                
+                if detection_result.hand_landmarks:
+                    self.roi_miss_count = 0 # 重置丢失计数
+                    
+                    for landmarks in detection_result.hand_landmarks:
+                        mapped_landmarks = []
+                        for lm in landmarks:
+                            # 1. 还原到 ROI 像素坐标 (假设输入图像是 processed_rgb)
+                            h_curr, w_curr = processed_rgb.shape[:2]
+                            px = lm.x * w_curr
+                            py = lm.y * h_curr
+                            
+                            if roi_info:
+                                # 2. 还原 Resize (x2)
+                                px = px * 2.0
+                                py = py * 2.0
+                                
+                                # 3. 还原 ROI 偏移
+                                roi_x, roi_y, _, _ = roi_info
+                                px += roi_x
+                                py += roi_y
+                            
+                            # 4. 归一化回全图 (target_w, target_h)
+                            final_x = px / target_w
+                            final_y = py / target_h
+                            
+                            mapped_landmarks.append(LandmarkLite(final_x, final_y, lm.z))
+                        mapped_landmarks_list.append(mapped_landmarks)
+                    
+                    # 更新 ROI
+                    # 计算所有检测到的手的新 ROI (基于全图归一化坐标)
+                    # 注意：这里我们使用映射回来的 mapped_landmarks_list 来计算新的 ROI
+                    next_roi = self._calculate_roi(mapped_landmarks_list)
+                    if next_roi:
+                        # 平滑 ROI 更新? 为了简单起见，直接更新
+                        self.roi = next_roi
+                else:
+                    self.roi_miss_count += 1
+                    mapped_landmarks_list = [] # 空列表
+                    if self.roi_miss_count > self.MAX_ROI_MISS_COUNT:
+                        self.roi = None # 丢失太久，重置为全图扫描
+                
+                # 替换原始结果中的 landmarks 以供后续逻辑使用
+                # 注意：detect_for_video 返回的是 immutable 对象结构，无法直接修改内部属性
+                # 但后续逻辑使用的是 filtered_landmarks，我们可以在这里拦截并替换
+                
+                # --- 过滤重叠手部 (使用映射后的坐标) ---
                 filtered_landmarks, filtered_handedness = self._filter_overlapping_hands(
-                    detection_result.hand_landmarks, 
+                    mapped_landmarks_list, 
                     detection_result.handedness
                 )
                 

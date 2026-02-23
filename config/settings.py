@@ -80,3 +80,30 @@ EYE_RADIUS = 60.0
 
 # Screen Projection
 AXIS_LENGTH = 500.0
+
+# --- Physical Constants (Unit: cm / meters as specified) ---
+
+# Eye Distance Constants (cm)
+# Used for depth estimation based on eye corner distances
+INNER_EYE_DIST_CM = 4.0
+OUTER_EYE_DIST_CM = 9.0
+
+# Hand Constants
+HAND_PALM_WIDTH_CM = 6.0  # Default palm width (distance between index and pinky MCP)
+PINCH_THRESHOLD_M = 0.02  # 2cm threshold for pinch detection
+
+# --- Tracking Confidence Thresholds ---
+
+# Face Tracking Confidence
+FACE_MIN_DETECTION_CONFIDENCE = 0.5
+FACE_MIN_PRESENCE_CONFIDENCE = 0.5
+FACE_MIN_TRACKING_CONFIDENCE = 0.5
+
+# Hand Tracking Confidence
+HAND_MIN_DETECTION_CONFIDENCE = 0.5
+HAND_MIN_PRESENCE_CONFIDENCE = 0.5
+HAND_MIN_TRACKING_CONFIDENCE = 0.5
+
+# Model Paths
+FACE_MESH_TASK_PATH = 'face_landmarker.task'
+HAND_LANDMARKER_TASK_PATH = 'hand_landmarker.task'

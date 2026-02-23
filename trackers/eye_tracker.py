@@ -134,8 +134,8 @@ class EyeTracker:
         d_outer_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
         
         # Real distances (cm)
-        D_INNER_REAL = 4.0
-        D_OUTER_REAL = 9.0
+        D_INNER_REAL = settings.INNER_EYE_DIST_CM
+        D_OUTER_REAL = settings.OUTER_EYE_DIST_CM
         
         # Focal length calculation (优化：计算一次，传递给 update_offset)
         fov_rad = math.radians(camera_fov)
