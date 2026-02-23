@@ -520,14 +520,14 @@ class HandProcessorProcess(multiprocessing.Process):
                 # 优化：直接使用共享内存，避免全量拷贝
                 frame = shm_array
                 
-                # 降分辨率处理
+                # 获取原始分辨率
                 h, w = frame.shape[:2]
                 aspect_ratio = w / float(h)
-                target_h = 720
-                scale = target_h / float(h)
-                target_w = int(w * scale)
                 
-                # 优化：预计算/缓存相机矩阵
+                # 计算全图模式下的目标分辨率 (用于 PnP 和全图扫描)
+                (target_w, target_h), global_scale, _ = GlobalImagePreprocessor.calculate_dimensions(frame.shape, settings.PREPROCESS_TARGET_HEIGHT)
+                
+                # 优化：预计算/缓存相机矩阵 (基于 720p 目标分辨率)
                 if (target_w, target_h) != cached_dims:
                     focal_length = (target_w / 2.0) / math.tan(math.radians(self.fov) / 2.0)
                     center = (target_w / 2.0, target_h / 2.0)
@@ -539,106 +539,118 @@ class HandProcessorProcess(multiprocessing.Process):
                     cached_dims = (target_w, target_h)
                 
                 processed_rgb = GlobalImagePreprocessor.to_rgb(frame)
-                processed_rgb = GlobalImagePreprocessor.resize_image(processed_rgb, target_size=(target_w, target_h))
                 
                 # --- ROI 处理逻辑 ---
-                # 1. 如果有 ROI，裁剪 ROI 区域
                 roi_info = None # (roi_x, roi_y, roi_w, roi_h) in processed_rgb pixel coords
+                
+                # 检查是否需要进行全图扫描 (ROI 不存在，或者间隔达到)
+                # 默认: ROI 存在时每一帧都跑 ROI; ROI 不存在时，每 HAND_FULL_SCAN_INTERVAL 帧跑一次全图
+                # 如果用户希望在 ROI 模式下也偶尔跑一次全图，可以在这里加逻辑，但当前需求主要是"ROI模式下仅获取ROI区域"
+                # 所以我们只在没有 ROI 时应用全图扫描间隔
+                
+                should_process = True
+                
                 if self.roi:
-                    roi_x_min, roi_y_min, roi_x_max, roi_y_max = self.roi
-                    roi_x = int(roi_x_min * target_w)
-                    roi_y = int(roi_y_min * target_h)
-                    roi_w_pixel = int((roi_x_max - roi_x_min) * target_w)
-                    roi_h_pixel = int((roi_y_max - roi_y_min) * target_h)
-                    
-                    # 边界检查
-                    roi_x = max(0, roi_x)
-                    roi_y = max(0, roi_y)
-                    roi_w_pixel = min(target_w - roi_x, roi_w_pixel)
-                    roi_h_pixel = min(target_h - roi_y, roi_h_pixel)
-                    
-                    if roi_w_pixel > 10 and roi_h_pixel > 10: # 确保 ROI 有效
-                        processed_rgb = processed_rgb[roi_y:roi_y+roi_h_pixel, roi_x:roi_x+roi_w_pixel]
-                        roi_info = (roi_x, roi_y, roi_w_pixel, roi_h_pixel)
+                    # ROI 模式：仅获取 ROI 区域，先降分辨率再高斯模糊
+                    cropped_roi, roi_rect = GlobalImagePreprocessor.crop_by_normalized_roi(processed_rgb, self.roi)
+                    if cropped_roi is not None:
+                        # 降分辨率 (ROI 缩放)
+                        processed_rgb = GlobalImagePreprocessor.resize_image(cropped_roi, scale_factor=settings.PREPROCESS_ROI_SCALE_FACTOR)
+                        roi_info = roi_rect
                     else:
                         # ROI 无效，回退到全图
                         self.roi = None
                         self.roi_miss_count = 0
                 
-                # 2. 降分辨率处理 (50%)
-                if roi_info:
-                    # 如果使用了 ROI，再降 50%
-                    processed_rgb = cv2.resize(processed_rgb, (0, 0), fx=0.5, fy=0.5)
-                else:
-                    # 如果是全图，保持当前的 720p 缩放 (或者也可以再降，视需求而定，这里保持原逻辑不变)
-                    # 原逻辑已经是 resize 到 target_w, target_h 了
-                    pass
+                if not roi_info:
+                    # 全图模式
+                    # 检查全图扫描频率
+                    if frame_id % settings.HAND_FULL_SCAN_INTERVAL != 0:
+                        should_process = False
+                    else:
+                        # 如果是全图扫描帧，先降分辨率
+                        processed_rgb = GlobalImagePreprocessor.resize_image(processed_rgb, target_size=(target_w, target_h))
                 
-                # 3. 高斯模糊
-                processed_rgb = cv2.GaussianBlur(processed_rgb, (5, 5), 0)
-                
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
                 timestamp_ms = int(time.time() * 1000)
-                
-                # MediaPipe 处理
-                detection_result = detector.detect_for_video(mp_image, timestamp_ms)
-                
-                # --- 坐标映射回全图 ---
-                # MediaPipe 返回的是归一化坐标 (相对于输入图像 processed_rgb)
-                # 如果使用了 ROI + Resize，需要逆变换
-                
                 mapped_landmarks_list = []
                 
-                if detection_result.hand_landmarks:
-                    self.roi_miss_count = 0 # 重置丢失计数
+                if should_process:
+                    # 3. 高斯模糊 (对 ROI 或 全图 都应用)
+                    processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(processed_rgb, kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE, sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
                     
-                    for landmarks in detection_result.hand_landmarks:
-                        mapped_landmarks = []
-                        for lm in landmarks:
-                            # 1. 还原到 ROI 像素坐标 (假设输入图像是 processed_rgb)
-                            h_curr, w_curr = processed_rgb.shape[:2]
-                            px = lm.x * w_curr
-                            py = lm.y * h_curr
-                            
-                            if roi_info:
-                                # 2. 还原 Resize (x2)
-                                px = px * 2.0
-                                py = py * 2.0
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
+                    
+                    # MediaPipe 处理
+                    detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+                    
+                    # --- 坐标映射回全图 ---
+                    if detection_result.hand_landmarks:
+                        self.roi_miss_count = 0 # 重置丢失计数
+                        
+                        for landmarks in detection_result.hand_landmarks:
+                            mapped_landmarks = []
+                            for lm in landmarks:
+                                # 1. 还原到当前图像 (processed_rgb) 像素坐标
+                                h_curr, w_curr = processed_rgb.shape[:2]
+                                px = lm.x * w_curr
+                                py = lm.y * h_curr
                                 
-                                # 3. 还原 ROI 偏移
-                                roi_x, roi_y, _, _ = roi_info
-                                px += roi_x
-                                py += roi_y
-                            
-                            # 4. 归一化回全图 (target_w, target_h)
-                            final_x = px / target_w
-                            final_y = py / target_h
-                            
-                            mapped_landmarks.append(LandmarkLite(final_x, final_y, lm.z))
-                        mapped_landmarks_list.append(mapped_landmarks)
-                    
-                    # 更新 ROI
-                    # 计算所有检测到的手的新 ROI (基于全图归一化坐标)
-                    # 注意：这里我们使用映射回来的 mapped_landmarks_list 来计算新的 ROI
-                    next_roi = self._calculate_roi(mapped_landmarks_list)
-                    if next_roi:
-                        # 平滑 ROI 更新? 为了简单起见，直接更新
-                        self.roi = next_roi
+                                if roi_info:
+                                    # ROI 模式：还原 ROI 缩放和偏移
+                                    # 2. 还原 ROI Resize
+                                    px = px / settings.PREPROCESS_ROI_SCALE_FACTOR
+                                    py = py / settings.PREPROCESS_ROI_SCALE_FACTOR
+                                    
+                                    # 3. 还原 ROI 偏移 (基于原图)
+                                    roi_x, roi_y, _, _ = roi_info
+                                    px += roi_x
+                                    py += roi_y
+                                    
+                                    # 4. 归一化回 720p 目标分辨率 (为了与 PnP 兼容)
+                                    final_x = (px / w) * target_w
+                                    final_y = (py / h) * target_h
+                                    
+                                else:
+                                    # 全图模式：输入已经是 resize 到 target_w 的图像
+                                    final_x = px
+                                    final_y = py
+                                
+                                # 归一化坐标用于 ROI 更新
+                                norm_x = final_x / target_w
+                                norm_y = final_y / target_h
+                                
+                                mapped_landmarks.append(LandmarkLite(norm_x, norm_y, lm.z))
+                            mapped_landmarks_list.append(mapped_landmarks)
+                        
+                        # 更新 ROI
+                        next_roi = self._calculate_roi(mapped_landmarks_list)
+                        if next_roi:
+                            self.roi = next_roi
+                    else:
+                        self.roi_miss_count += 1
+                        mapped_landmarks_list = [] # 空列表
+                        if self.roi_miss_count > self.MAX_ROI_MISS_COUNT:
+                            self.roi = None # 丢失太久，重置为全图扫描
                 else:
-                    self.roi_miss_count += 1
-                    mapped_landmarks_list = [] # 空列表
-                    if self.roi_miss_count > self.MAX_ROI_MISS_COUNT:
-                        self.roi = None # 丢失太久，重置为全图扫描
+                    # 如果跳过处理 (全图模式下的非扫描帧)，返回空结果或者沿用上一帧结果？
+                    # 这里返回空结果，让主线程处理
+                    pass
                 
                 # 替换原始结果中的 landmarks 以供后续逻辑使用
                 # 注意：detect_for_video 返回的是 immutable 对象结构，无法直接修改内部属性
                 # 但后续逻辑使用的是 filtered_landmarks，我们可以在这里拦截并替换
                 
                 # --- 过滤重叠手部 (使用映射后的坐标) ---
-                filtered_landmarks, filtered_handedness = self._filter_overlapping_hands(
-                    mapped_landmarks_list, 
-                    detection_result.handedness
-                )
+                # 注意：如果 should_process 为 False，detection_result 未定义，需要处理这种情况
+                
+                filtered_landmarks = []
+                filtered_handedness = []
+                
+                if should_process and 'detection_result' in locals():
+                    filtered_landmarks, filtered_handedness = self._filter_overlapping_hands(
+                        mapped_landmarks_list, 
+                        detection_result.handedness
+                    )
                 
                 result_lite = HandDetectionResultLite(filtered_landmarks, filtered_handedness)
                 

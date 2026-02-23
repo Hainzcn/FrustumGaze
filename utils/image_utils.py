@@ -9,6 +9,58 @@ class GlobalImagePreprocessor:
     """
     
     @staticmethod
+    def calculate_dimensions(original_shape, target_height):
+        """
+        根据目标高度计算新的尺寸，保持宽高比
+        :param original_shape: (h, w)
+        :param target_height: 目标高度
+        :return: (target_w, target_h), scale, aspect_ratio
+        """
+        h, w = original_shape[:2]
+        aspect_ratio = w / float(h)
+        scale = target_height / float(h)
+        target_w = int(w * scale)
+        return (target_w, target_height), scale, aspect_ratio
+
+    @staticmethod
+    def crop_by_normalized_roi(image, normalized_roi):
+        """
+        根据归一化 ROI 裁剪图像
+        :param image: 输入图像
+        :param normalized_roi: (x_min, y_min, x_max, y_max) 0-1 范围
+        :return: (cropped_image, roi_info)
+                 roi_info: (x, y, w, h) 像素坐标
+                 如果 ROI 无效返回 (None, None)
+        """
+        if normalized_roi is None:
+            return None, None
+            
+        h, w = image.shape[:2]
+        roi_x_min, roi_y_min, roi_x_max, roi_y_max = normalized_roi
+        
+        roi_x = int(roi_x_min * w)
+        roi_y = int(roi_y_min * h)
+        roi_w_pixel = int((roi_x_max - roi_x_min) * w)
+        roi_h_pixel = int((roi_y_max - roi_y_min) * h)
+        
+        # 边界检查
+        roi_x = max(0, roi_x)
+        roi_y = max(0, roi_y)
+        roi_w_pixel = min(w - roi_x, roi_w_pixel)
+        roi_h_pixel = min(h - roi_y, roi_h_pixel)
+        
+        if roi_w_pixel > 10 and roi_h_pixel > 10:
+            cropped = image[roi_y:roi_y+roi_h_pixel, roi_x:roi_x+roi_w_pixel]
+            return cropped, (roi_x, roi_y, roi_w_pixel, roi_h_pixel)
+            
+        return None, None
+
+    @staticmethod
+    def apply_gaussian_blur(image, kernel_size=(5, 5), sigma=0):
+        """应用高斯模糊"""
+        return cv2.GaussianBlur(image, kernel_size, sigma)
+
+    @staticmethod
     def resize_image(image, target_size=None, scale_factor=None, interpolation=cv2.INTER_LINEAR):
         """
         统一缩放逻辑
@@ -108,8 +160,7 @@ class ImagePreprocessor:
             # 使用全局工具
             crop = GlobalImagePreprocessor.resize_image(crop, target_size=(new_w, new_h))
         
-        # 3. 双边滤波 (边缘保留平滑)
-        # (已移除注释代码)
+        # 3. 双边滤波 (过于复杂删除)
         
         # 4. 对比度增强 (L 通道 CLAHE)
         # 使用全局工具
