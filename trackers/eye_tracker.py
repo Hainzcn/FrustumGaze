@@ -24,15 +24,15 @@ class EyeTracker:
         self.offset_x_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
         self.offset_y_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
         
-        # 记录主视眼位置用于绘制
-        self.dominant_eye_pos = None
+        # 记录头部中心位置用于绘制
+        self.head_center_pos = None
 
         # 初始化 OneEuroFilter 字典
         self.filters = {}
         self.filters_initialized = False
 
     def reset(self):
-        self.dominant_eye_pos = None
+        self.head_center_pos = None
         self.filters = {}
         self.filters_initialized = False
         self.current_yaw = 0.0
@@ -89,18 +89,29 @@ class EyeTracker:
             return (point.x * w, point.y * h)
         return None
 
-    def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov, cam_matrix, dist_coeffs):
+    def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov, cam_matrix, dist_coeffs, should_calc_gaze=True):
         """
         Process face landmarks to extract eye points, calculate distance and head pose.
         Returns a dictionary with results.
+        should_calc_gaze: 如果为 False，则跳过虹膜提取和视线计算，仅更新头部位置
         """
         w, h = frame_width, frame_height
         current_time = time.time() # 优化：一次获取时间戳
         
         # 1. Extract and Filter Points of Interest
-        # Iris
-        iris_l = self._extract_landmark_point(face_landmarks, 468, w, h)
-        iris_r = self._extract_landmark_point(face_landmarks, 473, w, h)
+        # Iris (仅在需要计算视线时提取)
+        iris_l = None
+        iris_r = None
+        f_iris_l = None
+        f_iris_r = None
+        
+        if should_calc_gaze:
+            iris_l = self._extract_landmark_point(face_landmarks, 468, w, h)
+            iris_r = self._extract_landmark_point(face_landmarks, 473, w, h)
+            
+            if iris_l and iris_r:
+                f_iris_l = (self._get_filter('iris_lx', iris_l[0], current_time), self._get_filter('iris_ly', iris_l[1], current_time))
+                f_iris_r = (self._get_filter('iris_rx', iris_r[0], current_time), self._get_filter('iris_ry', iris_r[1], current_time))
         
         # Inner Eye Corners (133, 362)
         inner_l = self._extract_landmark_point(face_landmarks, 133, w, h)
@@ -110,14 +121,12 @@ class EyeTracker:
         outer_l = self._extract_landmark_point(face_landmarks, 33, w, h)
         outer_r = self._extract_landmark_point(face_landmarks, 263, w, h)
         
-        if any(p is None for p in [iris_l, iris_r, inner_l, inner_r, outer_l, outer_r]):
+        # 必须检测到眼角才能计算头部位置
+        if any(p is None for p in [inner_l, inner_r, outer_l, outer_r]):
             return None
 
         # Apply OneEuro Filter to all points
         # Using specific keys for each coordinate
-        f_iris_l = (self._get_filter('iris_lx', iris_l[0], current_time), self._get_filter('iris_ly', iris_l[1], current_time))
-        f_iris_r = (self._get_filter('iris_rx', iris_r[0], current_time), self._get_filter('iris_ry', iris_r[1], current_time))
-        
         f_inner_l = (self._get_filter('inner_lx', inner_l[0], current_time), self._get_filter('inner_ly', inner_l[1], current_time))
         f_inner_r = (self._get_filter('inner_rx', inner_r[0], current_time), self._get_filter('inner_ry', inner_r[1], current_time))
         
@@ -125,8 +134,16 @@ class EyeTracker:
         f_outer_r = (self._get_filter('outer_rx', outer_r[0], current_time), self._get_filter('outer_ry', outer_r[1], current_time))
         
         # Format for return and legacy support
-        eye_points = [f_iris_l, f_iris_r]
-        raw_eye_points = [iris_l, iris_r]
+        eye_points = []
+        raw_eye_points = []
+        
+        if should_calc_gaze and f_iris_l and f_iris_r:
+            eye_points = [f_iris_l, f_iris_r]
+            raw_eye_points = [iris_l, iris_r]
+        else:
+            # 如果不计算视线，这里返回空列表，避免下游代码错误使用
+            eye_points = [] 
+            raw_eye_points = []
 
         # 2. Calculate Distance (using filtered inner/outer eye corners)
         # 优化：避免创建不必要的 np.array，直接计算欧几里得距离
@@ -153,7 +170,8 @@ class EyeTracker:
             estimated_dist = z_outer
             
         # Representative pixel distance (for filtering compatibility)
-        pixel_dist = (6.5 * focal_length) / estimated_dist if estimated_dist > 0 else 0
+        # 优化：使用内眼角间距作为像素标尺，而非依赖固定的瞳距假设
+        pixel_dist = d_inner_px
 
         # 3. Calculate Head Pose (PnP)
         # Using raw points for PnP as it usually benefits from raw data, 
@@ -174,7 +192,22 @@ class EyeTracker:
         
         # 5. Update offset
         # 优化：传递已计算的 focal_length，避免重复计算
-        self.update_offset(eye_points, w, h, filtered_pixel, filtered_estimated, focal_length=focal_length)
+        # 计算头部中心位置 (双眼中心/鼻梁)，而非使用右眼
+        # MediaPipe Landmark 168: Point between eyes
+        center_168 = self._extract_landmark_point(face_landmarks, 168, w, h)
+        
+        if center_168:
+            # 应用 OneEuroFilter 滤波
+            f_center_x = self._get_filter('head_center_x', center_168[0], current_time)
+            f_center_y = self._get_filter('head_center_y', center_168[1], current_time)
+            tracking_point = (f_center_x, f_center_y)
+        else:
+            # 回退方案：如果没有 168，使用之前计算的眼部中点
+            stable_rx = (f_inner_r[0] + f_outer_r[0]) / 2.0
+            stable_ry = (f_inner_r[1] + f_outer_r[1]) / 2.0
+            tracking_point = (stable_rx, stable_ry)
+
+        self.update_offset(tracking_point, w, h, filtered_pixel, filtered_estimated, focal_length=focal_length)
         
         # 记录 Yaw 以便可视化
         self.current_yaw = yaw
@@ -310,12 +343,14 @@ class EyeTracker:
         return gaze_vector, eye_center_cam
 
 
-    def update_offset(self, eye_points, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0, focal_length=None):
+    def update_offset(self, tracking_point, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0, focal_length=None):
         """
-        计算并更新右眼（画面左侧）相对于摄像机光轴的物理偏移
+        计算并更新头部中心（画面中双眼中心）相对于摄像机光轴的物理偏移
         采用针孔成像模型 (Pinhole Camera Model):
         X = Z * (x - cx) / fx
         Y = Z * (y - cy) / fy
+        
+        tracking_point: (u, v) 稳定的头部中心点（MediaPipe 168）
         """
         # 如果距离无效，尝试使用缓存
         if real_dist_cm <= 0:
@@ -324,15 +359,13 @@ class EyeTracker:
             else:
                 return
 
-        if len(eye_points) == 0:
+        if tracking_point is None:
             return
             
-        # 1. 确定右眼坐标 (u, v)
-        # 假设 eye_points 中 x 坐标较小的是右眼（画面左侧）
-        sorted_eyes = sorted(eye_points, key=lambda p: p[0])
-        right_eye = sorted_eyes[0]
-        self.dominant_eye_pos = (int(right_eye[0]), int(right_eye[1]))
-        u, v = right_eye
+        # 1. 确定头部中心坐标 (u, v)
+        # 使用传入的稳定跟踪点
+        u, v = tracking_point
+        self.head_center_pos = (int(u), int(v))
         
         # 2. 确定相机内参 (Intrinsics)
         # 主点 (Principal Point) 坐标 (cx, cy)

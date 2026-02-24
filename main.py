@@ -290,19 +290,23 @@ def main():
                 
                 # 如果是全图扫描模式，则跳过视线计算 (latest_face_result.face_landmarks 为空)
                 if not latest_using_full_scan and latest_face_result.face_landmarks:
-                    # 仅在符合视线解算频率的帧进行计算
-                    if frame_id % EYE_GAZE_CALCULATION_INTERVAL == 0:
-                        for face_landmarks in latest_face_result.face_landmarks:
-                            # 使用 EyeTracker 处理所有逻辑
-                            # 需要当前的图像尺寸
-                            h, w = frame_shape[:2]
-                            results = tracker.process_landmarks(
-                                face_landmarks, w, h, camera_fov, cam_matrix, dist_coeffs
-                            )
-                            
-                            if results is None:
-                                continue
+                    # 判断是否进行视线解算
+                    should_calc_gaze = (frame_id % EYE_GAZE_CALCULATION_INTERVAL == 0)
 
+                    for face_landmarks in latest_face_result.face_landmarks:
+                        # 使用 EyeTracker 处理所有逻辑
+                        # 需要当前的图像尺寸
+                        h, w = frame_shape[:2]
+                        results = tracker.process_landmarks(
+                            face_landmarks, w, h, camera_fov, cam_matrix, dist_coeffs,
+                            should_calc_gaze=should_calc_gaze
+                        )
+                        
+                        if results is None:
+                            continue
+
+                        # 只有在解算视线且成功时才更新可视化数据
+                        if should_calc_gaze and results.get('eye_points') and len(results['eye_points']) == 2:
                             latest_eye_points = results['eye_points']
                             latest_raw_eye_points = results['raw_eye_points']
                             rvec = results['rvec']
@@ -315,53 +319,18 @@ def main():
                                 gaze_data_container['tvec'] = tvec
                                 gaze_data_container['rmat'] = results.get('rmat')
                                 latest_gaze_data = gaze_data_container
-                    else:
-                        # 非解算帧，保持 latest_gaze_data 为 None (或者保持上一帧的值？用户要求"视线线段渲染跟随视线解算相同频率")
-                        # 如果这里设为 None，visualizer 就不会绘制。这符合"视线线段渲染跟随视线解算相同频率"的要求。
-                        # 但为了视觉连贯性，可能需要保持上一帧的绘制？
-                        # 根据用户指令 "视线线段渲染跟随视线解算相同频率"，意味着只有解算时才更新渲染。
-                        # Visualizer 内部逻辑将改为：有数据就画。
-                        # 如果我们在这里不更新 latest_gaze_data (保持为 None)，Visualizer 就不会画。
-                        # 如果想让 Visualizer 持续画上一帧的，需要在这里维持 latest_gaze_data 不变。
-                        # 但用户说 "视线线段渲染跟随视线解算相同频率"，可能意味着闪烁渲染？或者只是更新频率？
-                        # 通常 "渲染跟随解算频率" 意味着：解算一次，更新一次画面。如果解算频率低，画面更新就慢。
-                        # 为了避免闪烁，应该是在 Visualizer 里维持状态，或者在这里维持状态。
-                        # 但 Visualizer 的 render 每一帧都会被调用。
-                        # 让我们假设用户的意思是：只有在解算的那一帧，才提交新的 gaze_data 给 visualizer。
-                        # 而 visualizer 如果收到 None，就不画（即闪烁），或者画旧的？
-                        # 之前的逻辑是 visualizer 有 cached_viz_data。
-                        # 让我们修改 visualizer，使其仅在接收到新数据时更新缓存并绘制，或者仅绘制新数据。
-                        # 如果用户想要"节省性能"，那么非解算帧就不应该画线。
-                        # 如果用户想要"视觉流畅"，那么非解算帧应该画旧线。
-                        # 结合 "全图扫描时不渲染视线线段"，推测用户希望严格控制渲染时机。
-                        # 现在的实现：非解算帧 latest_gaze_data = None。Visualizer 收到 None 就不画。
-                        # 这样会造成闪烁（如果频率 < FPS）。
-                        # 如果频率是 2 (每2帧一次)，那么 1帧画，1帧不画 -> 闪烁。
-                        # 这可能不是用户想要的。通常是 "更新频率" 低，但绘制是持续的。
-                        # 但用户明确说 "视线线段渲染跟随视线解算相同频率"。
-                        # 这句话有点歧义。可能是 "渲染动作" 仅在 "解算动作" 发生时执行。
-                        # 也就是：解算帧 -> 算 -> 画；非解算帧 -> 不算 -> 不画。
-                        # 这样确实会闪烁。
-                        # 另一种理解：Visualizer 的绘制频率 = 解算频率。
-                        # 比如解算 30fps，绘制也 30fps。
-                        # 如果解算 15fps，绘制也 15fps。
-                        # 让我们先按 "非解算帧不传递数据" 实现，然后在 Visualizer 里决定是否使用缓存。
-                        # 查看 Todo 3: "移除内部的 render_counter，改为完全依赖传入的 gaze_data 是否更新来决定绘制 (如果 gaze_data 为 None 则不绘制)"
-                        # 这意味着：如果 main 传 None，visualizer 就不画。 -> 会闪烁。
-                        # 除非用户的 "渲染" 指的是 "计算并生成绘制指令"。
-                        # 如果用户能够接受闪烁，或者 EYE_GAZE_CALCULATION_INTERVAL 设置为 1，那就没问题。
-                        # 如果设置为 2，就会闪烁。
-                        # 考虑到 "全图扫描时不渲染"，可能是为了 debug 清楚知道什么时候在解算。
-                        # 我将按 "不解算就不绘制" 实现。
-                        pass
+                        else:
+                            # 非解算帧或失败，置空视线数据
+                            latest_gaze_data = None
 
-                        try:
-                            # 优化：批量读取 tracker 属性
-                            est_dist, off_x, off_y = tracker.get_gaze_params()
-                            data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
-                            udp_sender.send(data_str)
-                        except Exception as e:
-                            print(f"UDP Send Error: {e}")
+                    # 无论是否解算视线，都发送 UDP (Tracker 内部维护状态)
+                    try:
+                        # 优化：批量读取 tracker 属性
+                        est_dist, off_x, off_y = tracker.get_gaze_params()
+                        data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
+                        udp_sender.send(data_str)
+                    except Exception as e:
+                        print(f"UDP Send Error: {e}")
                 else:
                     tracker.reset()
             

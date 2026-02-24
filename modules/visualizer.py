@@ -62,10 +62,7 @@ class Visualizer:
         if eye_points and len(eye_points) == 2:
             self._draw_iris(frame, eye_points, raw_eye_points)
             
-            # 绘制瞳孔间距线
-            p1 = (int(eye_points[0][0]), int(eye_points[0][1]))
-            p2 = (int(eye_points[1][0]), int(eye_points[1][1]))
-            cv2.line(frame, p1, p2, (255, 255, 0), 2)
+            # 已移除瞳孔间距线绘制 (cv2.line)
 
         # 3. 更新并绘制视线 (如果有数据)
         # 根据用户指令：视线线段渲染跟随视线解算相同频率
@@ -215,15 +212,15 @@ class Visualizer:
     def _draw_iris(self, frame, eye_points, raw_eye_points):
         # 绘制虹膜中心 (使用滤波后的坐标绘制，以反馈真实追踪位置)
         f_p1, f_p2 = eye_points
-        cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1, cv2.LINE_AA) # Green for filtered
-        cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1, cv2.LINE_AA)
+        cv2.circle(frame, (int(f_p1[0]), int(f_p1[1])), 3, (0, 255, 0), -1) # Green for filtered
+        cv2.circle(frame, (int(f_p2[0]), int(f_p2[1])), 3, (0, 255, 0), -1)
         
         # 绘制原始点作为对比 (红色)
         if raw_eye_points:
             cx_left, cy_left = raw_eye_points[0]
             cx_right, cy_right = raw_eye_points[1]
-            cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1, cv2.LINE_AA)
-            cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1)
+            cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1)
 
     def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, tracker, rmat=None):
         # 获取虹膜 2D 坐标
@@ -249,23 +246,54 @@ class Visualizer:
         avg_screen_point = calculate_weighted_average(l_screen_point, r_screen_point)
         
         # --- 准备绘制数据 ---
-        # 调整：视线起点改为虹膜位置 (眼球表面)
+        # 调整：视线起点改为虹膜位置 (2D 投影点)
+        # 我们已经有虹膜的 2D 坐标 (eye_points)，可以直接使用
+        # 但为了保持与 l_end_3d 的 3D 一致性，我们最好投影 l_start_3d
+        # l_start_3d = l_eye_center_cam + l_gaze_vec * (EYE_RADIUS) # 实际上是虹膜在球面的位置
+        
+        # 计算虹膜在球面的 3D 位置
+        # calculate_single_eye_gaze 返回的 gaze_vector 是从 eye_center 指向虹膜的
+        # 且其长度已被归一化为 EYE_RADIUS (如果相交)
+        
+        # 终点从虹膜再延伸
+        # 为了视觉效果，起点设为虹膜位置
         l_start_3d = l_eye_center_cam + l_gaze_vec
         r_start_3d = r_eye_center_cam + r_gaze_vec
         
-        # 终点从虹膜再延伸
-        l_end_3d = l_eye_center_cam + l_gaze_vec * (AXIS_LENGTH / 60.0)
-        r_end_3d = r_eye_center_cam + r_gaze_vec * (AXIS_LENGTH / 60.0)
+        l_end_3d = l_start_3d + l_gaze_vec * (AXIS_LENGTH / 60.0) # 延伸长度
+        r_end_3d = r_start_3d + r_gaze_vec * (AXIS_LENGTH / 60.0)
 
         # 投影关键点
         points_to_project = np.array([l_start_3d, l_end_3d, r_start_3d, r_end_3d])
         projected_points, _ = cv2.projectPoints(points_to_project, np.zeros((3,1)), np.zeros((3,1)), cam_matrix, dist_coeffs)
         
+        # 优化：使用检测到的 2D 虹膜坐标作为起点，消除投影误差
+        # 计算投影向量 (方向和长度)
+        # l_vec = p_end - p_start
+        # r_vec = p_end - p_start
+        
+        l_p_start = projected_points[0][0]
+        l_p_end = projected_points[1][0]
+        r_p_start = projected_points[2][0]
+        r_p_end = projected_points[3][0]
+        
+        l_vec = l_p_end - l_p_start
+        r_vec = r_p_end - r_p_start
+        
+        # 使用真实 landmark 坐标作为起点
+        l_real_start = np.array(eye_points[0])
+        r_real_start = np.array(eye_points[1])
+        
+        # 计算新的终点
+        l_final_end = l_real_start + l_vec
+        r_final_end = r_real_start + r_vec
+        
         # 更新缓存
-        self.cached_viz_data['l_start'] = (int(projected_points[0][0][0]), int(projected_points[0][0][1]))
-        self.cached_viz_data['l_end'] = (int(projected_points[1][0][0]), int(projected_points[1][0][1]))
-        self.cached_viz_data['r_start'] = (int(projected_points[2][0][0]), int(projected_points[2][0][1]))
-        self.cached_viz_data['r_end'] = (int(projected_points[3][0][0]), int(projected_points[3][0][1]))
+        # 确保坐标是整数
+        self.cached_viz_data['l_start'] = (int(l_real_start[0]), int(l_real_start[1]))
+        self.cached_viz_data['l_end'] = (int(l_final_end[0]), int(l_final_end[1]))
+        self.cached_viz_data['r_start'] = (int(r_real_start[0]), int(r_real_start[1]))
+        self.cached_viz_data['r_end'] = (int(r_final_end[0]), int(r_final_end[1]))
         
         # 更新交点文本缓存
         if avg_screen_point is not None:
@@ -323,9 +351,10 @@ class Visualizer:
              color = self.cached_viz_data['text_color']
              cv2.putText(frame, gaze_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
 
-        # 绘制主视眼标记（黄色圆圈 + 'R'）
-        if tracker.dominant_eye_pos is not None:
-            dx, dy = tracker.dominant_eye_pos
+        # 绘制头部中心标记（黄色圆圈 + 'C'）
+        if tracker.head_center_pos is not None:
+            dx, dy = tracker.head_center_pos
             if 0 <= dx < w and 0 <= dy < h:
-                cv2.circle(frame, (dx, dy), 8, (0, 255, 255), 2)
-                cv2.putText(frame, "R", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)
+                # 修改为实心点 (radius=4, thickness=-1)
+                cv2.circle(frame, (dx, dy), 4, (0, 255, 255), -1)
+                cv2.putText(frame, "C", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)

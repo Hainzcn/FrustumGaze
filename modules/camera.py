@@ -244,10 +244,12 @@ def select_camera_device(config_manager):
     
     # 尝试自动加载上次使用的摄像头
     last_index = config_manager.get_last_camera()
-    if last_index is not None and last_index in available_indices:
-        print(f"检测到上次使用的摄像头 (索引 {last_index})，按 Enter 自动选择，或输入其他索引...")
     
-    if len(available_indices) == 1:
+    # 优先检查 last_index (直接启动逻辑)
+    if last_index is not None and last_index in available_indices:
+        print(f"配置文件指定上次使用的摄像头 (索引 {last_index})，直接启动...")
+        selected_index = last_index
+    elif len(available_indices) == 1:
         print(f"检测到单个摄像头 (索引 {available_indices[0]})，自动连接。")
         selected_index = available_indices[0]
     else:
