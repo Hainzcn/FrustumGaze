@@ -4,6 +4,7 @@ import numpy as np
 import time
 import queue
 import multiprocessing
+from collections import deque
 
 from config.settings import VISUALIZE, UDP_IP, UDP_PORT, LEFT_IRIS, RIGHT_IRIS, MODEL_POINTS, LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL, EYE_GAZE_CALCULATION_INTERVAL
 from modules.camera import CameraModel, ConfigManager, WebcamVideoStream, select_camera_device, select_resolution
@@ -142,7 +143,8 @@ def main():
 
     print("Pipeline started: Capture(Thread) -> SharedMem -> Process(Process) -> Main Loop")
 
-    # FPS 计算相关
+    # FPS 计算相关 (优化：滑动窗口平滑)
+    fps_history = deque(maxlen=30) # 存储最近30帧的瞬时 FPS
     prev_frame_time = 0
     last_processed_frame_id = -1
     
@@ -159,17 +161,24 @@ def main():
     latest_eye_points = []
     latest_raw_eye_points = []
     latest_gaze_data = None
-    latest_fps = 0
+    latest_fps = 0.0
     
     hand_frame_counter = 0
     eye_frame_counter = 0
 
-    # 丢包计算相关
+    # 丢包计算相关 (优化：统计真正的计算任务丢失)
+    # drop_rate 反映的是：本应该被处理的帧，因队列满而被丢弃的比例
     drop_rate = 0.0
     stat_start_time = time.time()
-    frames_in_last_sec = 0
-    processed_in_last_sec = 0
-
+    
+    # 统计计数器
+    stat_frames_captured = 0      # 摄像头捕获总帧数
+    stat_face_tasks_attempted = 0 # 尝试发送给 FaceProcessor 的任务数 (经过 interval 筛选)
+    stat_face_tasks_dropped = 0   # 因队列满而丢弃的任务数
+    stat_hand_tasks_attempted = 0 # 尝试发送给 HandProcessor 的任务数 (经过 interval 筛选)
+    stat_hand_tasks_dropped = 0   # 因队列满而丢弃的任务数
+    stat_processed_count = 0      # 实际完成处理并返回结果的帧数
+    
     try:
         while True:
             # 1. 从摄像头线程获取最新帧
@@ -189,39 +198,37 @@ def main():
                     current_display_frame = frame
                 
                 # 记录发送的帧数 (每秒窗口)
-                frames_in_last_sec += 1
+                stat_frames_captured += 1
                 
                 # 通知子进程有新帧
                 # 非阻塞 put，如果队列满了就丢弃旧任务（保持实时性）
                 
-                # 先尝试腾出空间
-                if input_queue.full():
-                    try:
-                        input_queue.get_nowait()
-                    except queue.Empty:
-                        pass
+                # 先尝试腾出空间 (可选策略：总是丢弃旧的，或者不丢弃旧的让其满)
+                # 这里为了保证实时性，如果满，应该丢弃最旧的，但这需要 get 再 put。
+                # 但 get 也会阻塞。这里采用简单的策略：如果满，说明处理慢。
+                # 统计逻辑：只有当我们 *尝试* 发送一个新任务，但因满而失败时，才算 Drop。
                 
                 # 优化计数器防止溢出
                 eye_frame_counter = (eye_frame_counter + 1) % EYE_TRACKING_INTERVAL
                 if eye_frame_counter == 0:
+                    stat_face_tasks_attempted += 1
                     try:
                         input_queue.put({'frame_id': frame_id}, block=False)
                     except queue.Full:
+                        # 队列满，任务被丢弃
+                        stat_face_tasks_dropped += 1
                         pass
 
                 # 同样通知手部追踪进程 (每多少帧发送一次，由配置决定)
                 hand_frame_counter = (hand_frame_counter + 1) % HAND_TRACKING_INTERVAL
                 if hand_frame_counter == 0:
-                    # 先尝试腾出空间
-                    if hand_input_queue.full():
-                        try:
-                            hand_input_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                    
+                    stat_hand_tasks_attempted += 1
+                    # 统计逻辑：只有当我们 *尝试* 发送一个新任务，但因满而失败时，才算 Drop。
                     try:
                         hand_input_queue.put({'frame_id': frame_id}, block=False)
                     except queue.Full:
+                        # 队列满，任务被丢弃
+                        stat_hand_tasks_dropped += 1
                         pass
 
             # 检查是否有手部追踪结果
@@ -259,16 +266,21 @@ def main():
                 latest_using_full_scan = result_data.get('using_full_scan', False) # 获取状态
                 
                 # 记录处理完成的帧数 (每秒窗口)
-                processed_in_last_sec += 1
+                stat_processed_count += 1
 
                 last_processed_frame_id = current_frame_id
                 
-                # 更新 FPS
+                # 更新 FPS (使用平滑平均值)
                 new_frame_time = time.time()
                 if prev_frame_time > 0:
                     delta = new_frame_time - prev_frame_time
                     if delta > 0:
-                        latest_fps = 1.0 / delta
+                        instant_fps = 1.0 / delta
+                        fps_history.append(instant_fps)
+                        
+                        # 计算滑动窗口平均值
+                        if len(fps_history) > 0:
+                            latest_fps = sum(fps_history) / len(fps_history)
                 prev_frame_time = new_frame_time
                 
                 # 处理视线数据 (更新 latest_eye_points 等)
@@ -359,16 +371,27 @@ def main():
             # 每秒更新一次丢包率
             current_time = time.time()
             if current_time - stat_start_time >= 1.0:
-                if frames_in_last_sec > 0:
-                    # 丢包率 = (输入帧数 - 处理帧数) / 输入帧数
-                    calculated_drop = (frames_in_last_sec - processed_in_last_sec) / frames_in_last_sec
+                # 丢包率 = (因队列满而丢弃的任务数) / (尝试发送的总任务数)
+                # 只有当有尝试发送时才计算，否则保持上一秒的值（或者设为0）
+                total_attempts = stat_face_tasks_attempted + stat_hand_tasks_attempted
+                total_drops = stat_face_tasks_dropped + stat_hand_tasks_dropped
+                
+                if total_attempts > 0:
+                    calculated_drop = total_drops / total_attempts
                     drop_rate = max(0.0, min(1.0, calculated_drop))
                 else:
                     drop_rate = 0.0
                 
+                # 打印调试信息 (可选)
+                # print(f"FPS: {latest_fps:.1f} | Captured: {stat_frames_captured} | Attempted(F/H): {stat_face_tasks_attempted}/{stat_hand_tasks_attempted} | Dropped(F/H): {stat_face_tasks_dropped}/{stat_hand_tasks_dropped} | Processed: {stat_processed_count} | DropRate: {drop_rate:.2%}")
+                
                 # 重置计数器
-                frames_in_last_sec = 0
-                processed_in_last_sec = 0
+                stat_frames_captured = 0
+                stat_face_tasks_attempted = 0
+                stat_face_tasks_dropped = 0
+                stat_hand_tasks_attempted = 0
+                stat_hand_tasks_dropped = 0
+                stat_processed_count = 0
                 stat_start_time = current_time
 
             # 3. 可视化渲染 (解耦：只要有帧就渲染，使用最新的检测结果)
