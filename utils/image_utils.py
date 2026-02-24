@@ -76,6 +76,8 @@ class GlobalImagePreprocessor:
         if target_size is not None:
             return cv2.resize(image, target_size, interpolation=interpolation)
         elif scale_factor is not None:
+            if scale_factor == 1.0:
+                return image
             return cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=interpolation)
         return image
 
@@ -128,7 +130,7 @@ class ImagePreprocessor:
         self.alpha = 0.7 # ROI 平滑因子 (0-1)
         # self.clahe = None # 移除：改用 GlobalImagePreprocessor
 
-    def process(self, frame, last_landmarks=None):
+    def process(self, frame, last_landmarks=None, padding_factor=2.0):
         """
         预处理：ROI 裁剪 -> 放大 -> 双边滤波 -> 对比度增强
         返回：processed_frame, roi_info (x, y, w, h, scale)
@@ -136,7 +138,7 @@ class ImagePreprocessor:
         h_frame, w_frame = frame.shape[:2]
         
         # 1. 计算 ROI
-        roi = self._compute_roi(w_frame, h_frame, last_landmarks)
+        roi = self._compute_roi(w_frame, h_frame, last_landmarks, padding_factor)
         x, y, w, h = roi
         
         # 裁剪
@@ -168,7 +170,7 @@ class ImagePreprocessor:
         
         return crop, (x, y, w, h, scale_factor)
 
-    def _compute_roi(self, w_frame, h_frame, landmarks):
+    def _compute_roi(self, w_frame, h_frame, landmarks, padding_factor=2.0):
         if landmarks is None:
             # 丢失目标或初始状态：平滑重置为全帧
             target_roi = (0, 0, w_frame, h_frame)
@@ -187,7 +189,7 @@ class ImagePreprocessor:
             fh = (max_y - min_y) * h_frame
             
             # 扩展范围 (填充)
-            padding = 2.0 
+            padding = padding_factor
             size = max(fw, fh) * padding
             
             # 计算左上角

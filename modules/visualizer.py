@@ -32,13 +32,31 @@ class Visualizer:
             (0, 17)
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, hands_pos=None, closest_hand=None):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
         """
         统一渲染入口
         """
+        # 0. 绘制 ROI 选框 (调试用)
+        if roi_info:
+            roi_x, roi_y, roi_w, roi_h, _ = roi_info
+            # 全图扫描时用红色虚线/实线，ROI 模式用绿色实线
+            color = (0, 0, 255) if using_full_scan else (0, 255, 0)
+            thickness = 2
+            cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), color, thickness)
+            
+            # 标注模式
+            mode_text = "FULL SCAN - SEARCHING" if using_full_scan else "ROI MODE - TRACKING"
+            cv2.putText(frame, mode_text, (roi_x, max(20, roi_y - 10)), self.FONT, 0.5, color, 1)
+
         # 1. 绘制手部关键点
         if hand_result:
             self.draw_hands(frame, hand_result, hands_pos, closest_hand)
+        
+        # 如果是全图扫描模式，仅绘制 ROI 框，不绘制后续的面部细节
+        if using_full_scan:
+             # 5. 显示并处理按键 (保持显示逻辑)
+             cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
+             return cv2.waitKey(1) & 0xFF == 27 
 
         # 3. 绘制虹膜
         if eye_points and len(eye_points) == 2:
@@ -50,19 +68,27 @@ class Visualizer:
             cv2.line(frame, p1, p2, (255, 255, 0), 2)
 
         # 3. 更新并绘制视线 (如果有数据)
+        # 根据用户指令：视线线段渲染跟随视线解算相同频率
+        # 因此，只有当 main 传递了有效的 gaze_data 时，才更新渲染数据
         if gaze_data:
-            self.render_counter += 1
-            if self.render_counter >= GAZE_RENDER_INTERVAL:
-                self.render_counter = 0
-                self._update_gaze_viz_with_tracker(
-                    gaze_data['rvec'], 
-                    gaze_data['tvec'], 
-                    eye_points, 
-                    gaze_data['cam_matrix'], 
-                    gaze_data['dist_coeffs'],
-                    tracker,
-                    rmat=gaze_data.get('rmat')
-                )
+            self._update_gaze_viz_with_tracker(
+                gaze_data['rvec'], 
+                gaze_data['tvec'], 
+                eye_points, 
+                gaze_data['cam_matrix'], 
+                gaze_data['dist_coeffs'],
+                tracker,
+                rmat=gaze_data.get('rmat')
+            )
+        else:
+            # 如果没有新数据（非解算帧），清空或保持？
+            # 根据 "全图扫描时不渲染视线线段"，这里其实已经在上方 if using_full_scan 中被拦截了
+            # 但对于 ROI 模式下的非解算帧，gaze_data 为 None
+            # 如果不更新，_draw_overlay 将使用 cached_viz_data 绘制上一帧的线
+            # 这通常是期望的（画面流畅），但如果用户想要明确的"不渲染"，则需要清空 cache
+            # 鉴于 "视线线段渲染跟随视线解算相同频率"，这可能意味着线段的 *位置更新* 跟随解算频率，而不是 *闪烁*
+            # 但为了严谨，如果 gaze_data 为 None (非解算帧)，我们不调用 update，_draw_overlay 会继续画旧的
+            pass
         
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
         self._draw_overlay(frame, tracker, fps, drop_rate)

@@ -538,24 +538,24 @@ class HandProcessorProcess(multiprocessing.Process):
                     )
                     cached_dims = (target_w, target_h)
                 
-                processed_rgb = GlobalImagePreprocessor.to_rgb(frame)
+                # processed_rgb = GlobalImagePreprocessor.to_rgb(frame) # 移除：延迟转换
                 
                 # --- ROI 处理逻辑 ---
                 roi_info = None # (roi_x, roi_y, roi_w, roi_h) in processed_rgb pixel coords
+                processed_rgb = None
                 
                 # 检查是否需要进行全图扫描 (ROI 不存在，或者间隔达到)
-                # 默认: ROI 存在时每一帧都跑 ROI; ROI 不存在时，每 HAND_FULL_SCAN_INTERVAL 帧跑一次全图
-                # 如果用户希望在 ROI 模式下也偶尔跑一次全图，可以在这里加逻辑，但当前需求主要是"ROI模式下仅获取ROI区域"
-                # 所以我们只在没有 ROI 时应用全图扫描间隔
-                
                 should_process = True
                 
                 if self.roi:
-                    # ROI 模式：仅获取 ROI 区域，先降分辨率再高斯模糊
-                    cropped_roi, roi_rect = GlobalImagePreprocessor.crop_by_normalized_roi(processed_rgb, self.roi)
+                    # ROI 模式：仅获取 ROI 区域 (注意这里使用 BGR)
+                    # 先从原始 BGR 帧裁剪
+                    cropped_roi, roi_rect = GlobalImagePreprocessor.crop_by_normalized_roi(frame, self.roi)
                     if cropped_roi is not None:
-                        # 降分辨率 (ROI 缩放)
-                        processed_rgb = GlobalImagePreprocessor.resize_image(cropped_roi, scale_factor=settings.PREPROCESS_ROI_SCALE_FACTOR)
+                        # 降分辨率 (ROI 缩放) - BGR
+                        resized_roi = GlobalImagePreprocessor.resize_image(cropped_roi, scale_factor=settings.PREPROCESS_ROI_SCALE_FACTOR)
+                        # 转换 RGB (仅 ROI 区域)
+                        processed_rgb = GlobalImagePreprocessor.to_rgb(resized_roi)
                         roi_info = roi_rect
                     else:
                         # ROI 无效，回退到全图
@@ -565,16 +565,18 @@ class HandProcessorProcess(multiprocessing.Process):
                 if not roi_info:
                     # 全图模式
                     # 检查全图扫描频率
-                    if frame_id % settings.HAND_FULL_SCAN_INTERVAL != 0:
+                    if frame_id % settings.FULL_SCAN_INTERVAL != 0:
                         should_process = False
                     else:
-                        # 如果是全图扫描帧，先降分辨率
-                        processed_rgb = GlobalImagePreprocessor.resize_image(processed_rgb, target_size=(target_w, target_h))
+                        # 如果是全图扫描帧，先降分辨率 (BGR)
+                        resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(target_w, target_h))
+                        # 再转换 RGB
+                        processed_rgb = GlobalImagePreprocessor.to_rgb(resized_bgr)
                 
                 timestamp_ms = int(time.time() * 1000)
                 mapped_landmarks_list = []
                 
-                if should_process:
+                if should_process and processed_rgb is not None:
                     # 3. 高斯模糊 (对 ROI 或 全图 都应用)
                     processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(processed_rgb, kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE, sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
                     

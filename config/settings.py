@@ -7,9 +7,10 @@ VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计
 # Tracking Intervals (每多少帧处理一次)
 # 设置为 1 表示每一帧都处理
 EYE_TRACKING_INTERVAL = 1
-HAND_TRACKING_INTERVAL = 1
-GAZE_RENDER_INTERVAL = 1 # 视线线段渲染频率 (每多少帧更新一次)
-HAND_FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
+HAND_TRACKING_INTERVAL = 1 # 手部追踪频率 (每多少帧进行一次手部检测)
+EYE_GAZE_CALCULATION_INTERVAL = 2 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
+GAZE_RENDER_INTERVAL = 2 # 视线线段渲染频率 (每多少帧更新一次)
+FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
 
 # 滤波器参数设置
 
@@ -110,7 +111,7 @@ FACE_MESH_TASK_PATH = 'face_landmarker.task'
 HAND_LANDMARKER_TASK_PATH = 'hand_landmarker.task'
 
 # --- Image Preprocessing ---
-PREPROCESS_TARGET_HEIGHT = 720  # 预处理目标高度
-PREPROCESS_ROI_SCALE_FACTOR = 0.5 # ROI 区域二次缩放比例
+PREPROCESS_TARGET_HEIGHT = 1080  # 预处理目标高度
+PREPROCESS_ROI_SCALE_FACTOR = 1.0 # ROI 区域二次缩放比例
 PREPROCESS_GAUSSIAN_KERNEL_SIZE = (5, 5) # 高斯模糊核大小
 PREPROCESS_GAUSSIAN_SIGMA = 0 # 高斯模糊 Sigma

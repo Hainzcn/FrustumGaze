@@ -170,6 +170,11 @@ class WebcamVideoStream:
 
             self.frame_id += 1
             
+            # 防止溢出，定期重置
+            # 10亿帧约等于385天@30fps，重置对取模逻辑影响微乎其微
+            if self.frame_id > 1000000000:
+                self.frame_id = 0
+            
             # 如果配置了共享内存，直接写入
             if self.shm_array is not None and frame is not None:
                 try:
