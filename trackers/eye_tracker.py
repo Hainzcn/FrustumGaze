@@ -227,9 +227,9 @@ class EyeTracker:
         """Calculates head pose using PnP and verifies with Reprojection Error."""
         # 2D 图像点 (使用 MediaPipe 关键点索引)
         # 1: Nose Tip, 152: Chin, 33: Left Eye Outer, 263: Right Eye Outer, 
-        # 61: Left Mouth Corner, 291: Right Mouth Corner, 133: Left Eye Inner, 
-        # 362: Right Eye Inner, 70: Left Eyebrow Outer, 300: Right Eyebrow Outer, 2: Nose Bottom
-        indices = [1, 152, 33, 263, 61, 291, 133, 362, 70, 300, 2]
+        # 61: Left Mouth Corner, 291: Right Mouth Corner
+        # 仅保留最必要的 6 个点以提升性能
+        indices = [1, 152, 33, 263, 61, 291]
         
         # 优化：预分配 numpy 数组，避免循环 append
         image_points = np.empty((len(indices), 2), dtype=np.float64)
@@ -263,10 +263,9 @@ class EyeTracker:
         if not success:
             return 0, 0, 0, None, None, None
 
-        # --- 验证逻辑: 计算重投影误差 ---
-        # 这一步开销不小，如果性能敏感可以考虑去掉或者降频执行
-        projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
-        error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
+        # --- 验证逻辑: 计算重投影误差 (已移除以节省性能) ---
+        # projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
+        # error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
         
         # 计算欧拉角
         # 优化：返回 rmat 供复用
