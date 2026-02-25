@@ -56,7 +56,7 @@ class ConfigManager:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     # --- 摄像头数据管理 ---
-    def update_camera(self, device_index, fov=None, name=None, user_configured=False, resolution=None, exposure=None):
+    def update_camera(self, device_index, fov=None, name=None, user_configured=False, resolution=None, exposure=None, api_backend=None):
         idx_str = str(device_index)
         if idx_str not in self.cameras_data:
             self.cameras_data[idx_str] = {
@@ -75,6 +75,8 @@ class ConfigManager:
             self.cameras_data[idx_str]["resolution"] = resolution
         if exposure is not None:
             self.cameras_data[idx_str]["exposure"] = exposure
+        if api_backend is not None:
+            self.cameras_data[idx_str]["api_backend"] = api_backend
             
         self._save_json(self.cameras_config_path, self.cameras_data)
 
