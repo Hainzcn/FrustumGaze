@@ -10,6 +10,8 @@ from mediapipe.tasks.python import vision
 from modules.shared_mem import get_shared_array
 from utils.image_utils import GlobalImagePreprocessor
 from config import settings
+from trackers.eye_tracker import EyeTracker
+from modules.camera import CameraModel
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
@@ -31,14 +33,15 @@ class DetectionResultLite:
                 self.face_landmarks.append(simple_landmarks)
 
 class FrameProcessorProcess(multiprocessing.Process):
-    def __init__(self, input_queue, output_queue, preprocessor, stop_event, shm_name, frame_shape):
+    def __init__(self, input_queue, output_queue, preprocessor, stop_event, shm_names, frame_shape, camera_fov=60.0):
         super().__init__()
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.preprocessor = preprocessor # 注意：preprocessor 会被 pickle 复制到子进程
         self.stop_event = stop_event
-        self.shm_name = shm_name
+        self.shm_names = shm_names # List of names
         self.frame_shape = frame_shape
+        self.camera_fov = camera_fov
         self.last_landmarks_norm = None
         self.daemon = True # 设置为守护进程
         self.using_full_scan = True # 初始化状态
@@ -46,12 +49,21 @@ class FrameProcessorProcess(multiprocessing.Process):
     def run(self):
         # --- 在子进程中初始化资源 ---
         
-        # 1. 连接共享内存
-        try:
-            shm_manager, shm_array = get_shared_array(self.shm_name, self.frame_shape)
-        except Exception as e:
-            print(f"FrameProcessorProcess: Failed to connect to shared memory: {e}")
-            return
+        # 1. 连接共享内存 (双缓冲)
+        self.shm_managers = []
+        self.shm_arrays = []
+        
+        # 兼容旧代码传入单个 name 的情况 (虽然不建议)
+        names = self.shm_names if isinstance(self.shm_names, list) else [self.shm_names]
+        
+        for name in names:
+            try:
+                mgr, arr = get_shared_array(name, self.frame_shape)
+                self.shm_managers.append(mgr)
+                self.shm_arrays.append(arr)
+            except Exception as e:
+                print(f"FrameProcessorProcess: Failed to connect to shared memory {name}: {e}")
+                return
 
         # 2. 初始化 MediaPipe (必须在子进程中进行)
         # 注意：这里假设 model_asset_path 在当前工作目录
@@ -74,15 +86,31 @@ class FrameProcessorProcess(multiprocessing.Process):
 
         print("FrameProcessorProcess: Started and Ready.")
 
+        # 3. 初始化 EyeTracker
+        tracker = EyeTracker()
+        
+        # 4. 初始化 CameraModel (用于获取内参)
+        # 注意: 这里的 frame_shape 是 (h, w, 3)
+        actual_h, actual_w = self.frame_shape[:2]
+        camera_model = CameraModel(actual_w, actual_h, self.camera_fov)
+        cam_matrix = camera_model.cam_matrix
+        dist_coeffs = camera_model.dist_coeffs
+
         while not self.stop_event.is_set():
             try:
                 # 阻塞等待任务
-                # 任务格式: {'frame_id': ...}
+                # 任务格式: {'frame_id': ..., 'buffer_idx': ...}
                 task = self.input_queue.get(timeout=0.1) # 增加超时时间防止空轮询过快
                 frame_id = task['frame_id']
+                buffer_idx = task.get('buffer_idx', 0) # 默认为 0
                 
                 # 从共享内存直接访问 (Zero-Copy)
-                frame = shm_array
+                if buffer_idx < len(self.shm_arrays):
+                    frame = self.shm_arrays[buffer_idx]
+                else:
+                    # Fallback
+                    frame = self.shm_arrays[0]
+
                 h, w = frame.shape[:2]
                 
                 # 检查是否需要处理
@@ -161,13 +189,36 @@ class FrameProcessorProcess(multiprocessing.Process):
                 # 优化: 全图扫描模式下，检测到目标后仅返回 ROI 区域信息，不返回详细的关键点数据
                 # 这样可以避免 Main 进程进行昂贵的 EyeTracking 计算
                 result_lite = None
+                processed_gaze_data = None
+                
                 if self.using_full_scan and detection_result.face_landmarks:
                      # 构造一个空的 Result，或者包含特定标志
                      result_lite = DetectionResultLite([]) # 空的关键点列表
-                else:
+                     tracker.reset() # 丢失跟踪时重置滤波器
+                elif not self.using_full_scan and detection_result.face_landmarks:
                     # 正常 ROI 模式，返回完整结果
                     result_lite = DetectionResultLite(detection_result.face_landmarks)
-                
+                    
+                    # --- 执行视线解算 ---
+                    should_calc_gaze = (frame_id % settings.EYE_GAZE_CALCULATION_INTERVAL == 0)
+                    
+                    # 只需要处理第一个人脸
+                    face_landmarks = detection_result.face_landmarks[0]
+                    
+                    processed_gaze_data = tracker.process_landmarks(
+                        face_landmarks, w, h, self.camera_fov, cam_matrix, dist_coeffs,
+                        should_calc_gaze=should_calc_gaze
+                    )
+                    
+                    # 添加额外的 tracker 状态信息以便主进程直接使用
+                    if processed_gaze_data:
+                        est_dist, off_x, off_y = tracker.get_gaze_params()
+                        processed_gaze_data['gaze_params'] = (est_dist, off_x, off_y)
+                        processed_gaze_data['head_center_pos'] = tracker.head_center_pos
+                        processed_gaze_data['current_pixel_dist'] = tracker.current_pixel_dist
+                else:
+                    tracker.reset()
+
                 # 将结果放入输出队列
                 if self.output_queue.full():
                     try:
@@ -180,7 +231,8 @@ class FrameProcessorProcess(multiprocessing.Process):
                     'detection_result': result_lite,
                     'roi_info': roi_info,
                     'using_full_scan': self.using_full_scan, # 传递全图扫描状态
-                    'timestamp': timestamp_ms
+                    'timestamp': timestamp_ms,
+                    'processed_gaze_data': processed_gaze_data # 新增：处理后的视线数据
                 })
                 
             except queue.Empty:
@@ -191,4 +243,8 @@ class FrameProcessorProcess(multiprocessing.Process):
                 traceback.print_exc()
 
         # 清理
-        shm_manager.close()
+        for mgr in self.shm_managers:
+            try:
+                mgr.close()
+            except:
+                pass

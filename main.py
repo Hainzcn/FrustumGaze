@@ -85,18 +85,28 @@ def main():
     if int(actual_w) != target_w or int(actual_h) != target_h:
         print(f"警告: 实际分辨率 ({int(actual_w)}x{int(actual_h)}) 与请求分辨率 ({target_w}x{target_h}) 不一致。")
 
-    # 初始化共享内存块
+    # 初始化共享内存块 (双缓冲)
     # 创建足够大的共享内存块用于存图像 (Height, Width, 3)
     frame_shape = (int(actual_h), int(actual_w), 3)
-    shm_name = "frustum_gaze_frame_buffer"
-    try:
-        shm_manager, shm_array = create_shared_array(frame_shape, dtype=np.uint8, name=shm_name)
-    except Exception as e:
-        print(f"Failed to create shared memory: {e}")
-        return
+    
+    shm_names = []
+    shm_managers = []
+    shm_arrays = []
+    
+    # 创建两个缓冲区
+    for i in range(2):
+        name = f"frustum_gaze_frame_buffer_{i}"
+        try:
+            mgr, arr = create_shared_array(frame_shape, dtype=np.uint8, name=name)
+            shm_names.append(name)
+            shm_managers.append(mgr)
+            shm_arrays.append(arr)
+        except Exception as e:
+            print(f"Failed to create shared memory {name}: {e}")
+            return
         
-    # 注入共享内存到 VideoStream
-    video_stream.set_shared_memory(shm_array)
+    # 注入共享内存列表到 VideoStream
+    video_stream.set_shared_memory(shm_arrays)
 
     # 相机模型初始化
     camera_model = CameraModel(actual_w, actual_h, camera_fov)
@@ -121,13 +131,15 @@ def main():
     visualizer = Visualizer()
 
     # --- 启动处理进程 ---
+    # 传递 shm_names 列表
     processing_process = FrameProcessorProcess(
         input_queue, 
         output_queue, 
         preprocessor, 
         stop_event,
-        shm_name,
-        frame_shape
+        shm_names,
+        frame_shape,
+        camera_fov=camera_fov
     )
     processing_process.start()
 
@@ -135,7 +147,7 @@ def main():
         hand_input_queue,
         hand_output_queue,
         stop_event,
-        shm_name,
+        shm_names,
         frame_shape,
         fov=camera_fov
     )
@@ -185,17 +197,18 @@ def main():
             # 优化：frame 可能为 None (如果 shm_array 被使用)，因为数据已经直接写入共享内存
             has_frame, frame_data = video_stream.read()
             if has_frame:
-                frame, frame_id = frame_data
+                frame, frame_id, buffer_idx = frame_data
                 
                 # 如果 frame 为 None，说明数据已经在 shm_array 中
-                if frame is None:
+                if frame is None and buffer_idx >= 0:
                     # 使用共享内存数据
                     # 为了不污染共享内存（因为子进程要读原始图），显示用的帧必须拷贝
-                    current_display_frame = shm_array.copy()
-                else:
-                    # 传统模式（备用）
-                    np.copyto(shm_array, frame)
+                    current_display_frame = shm_arrays[buffer_idx].copy()
+                elif frame is not None:
+                    # 传统模式（备用）- 假设只写入第一个buffer
+                    np.copyto(shm_arrays[0], frame)
                     current_display_frame = frame
+                    buffer_idx = 0 # 强制设为0以便后续逻辑通用
                 
                 # 记录发送的帧数 (每秒窗口)
                 stat_frames_captured += 1
@@ -213,7 +226,7 @@ def main():
                 if eye_frame_counter == 0:
                     stat_face_tasks_attempted += 1
                     try:
-                        input_queue.put({'frame_id': frame_id}, block=False)
+                        input_queue.put({'frame_id': frame_id, 'buffer_idx': buffer_idx}, block=False)
                     except queue.Full:
                         # 队列满，任务被丢弃
                         stat_face_tasks_dropped += 1
@@ -225,7 +238,7 @@ def main():
                     stat_hand_tasks_attempted += 1
                     # 统计逻辑：只有当我们 *尝试* 发送一个新任务，但因满而失败时，才算 Drop。
                     try:
-                        hand_input_queue.put({'frame_id': frame_id}, block=False)
+                        hand_input_queue.put({'frame_id': frame_id, 'buffer_idx': buffer_idx}, block=False)
                     except queue.Full:
                         # 队列满，任务被丢弃
                         stat_hand_tasks_dropped += 1
@@ -289,48 +302,48 @@ def main():
                 latest_gaze_data = None
                 
                 # 如果是全图扫描模式，则跳过视线计算 (latest_face_result.face_landmarks 为空)
-                if not latest_using_full_scan and latest_face_result.face_landmarks:
-                    # 判断是否进行视线解算
-                    should_calc_gaze = (frame_id % EYE_GAZE_CALCULATION_INTERVAL == 0)
+                if not latest_using_full_scan:
+                    # 获取预处理后的视线数据
+                    processed_gaze_data = result_data.get('processed_gaze_data')
+                    
+                    if processed_gaze_data:
+                        # 更新 tracker 状态以便 Visualizer 使用
+                        est_dist, off_x, off_y = processed_gaze_data['gaze_params']
+                        tracker.current_estimated_dist = est_dist
+                        tracker.current_offset_x = off_x
+                        tracker.current_offset_y = off_y
+                        tracker.current_pixel_dist = processed_gaze_data.get('current_pixel_dist', 0)
+                        tracker.head_center_pos = processed_gaze_data.get('head_center_pos')
+                        tracker.current_yaw = processed_gaze_data.get('yaw', 0.0)
 
-                    for face_landmarks in latest_face_result.face_landmarks:
-                        # 使用 EyeTracker 处理所有逻辑
-                        # 需要当前的图像尺寸
-                        h, w = frame_shape[:2]
-                        results = tracker.process_landmarks(
-                            face_landmarks, w, h, camera_fov, cam_matrix, dist_coeffs,
-                            should_calc_gaze=should_calc_gaze
-                        )
+                        # 更新最新点位数据
+                        latest_eye_points = processed_gaze_data.get('eye_points', [])
+                        latest_raw_eye_points = processed_gaze_data.get('raw_eye_points', [])
                         
-                        if results is None:
-                            continue
+                        rvec = processed_gaze_data.get('rvec')
+                        tvec = processed_gaze_data.get('tvec')
+                        
+                        # 准备视线可视化数据
+                        if VISUALIZE and rvec is not None and tvec is not None:
+                            # 优化：复用字典对象，仅更新变化的值
+                            gaze_data_container['rvec'] = rvec
+                            gaze_data_container['tvec'] = tvec
+                            gaze_data_container['rmat'] = processed_gaze_data.get('rmat')
+                            latest_gaze_data = gaze_data_container
+                        
+                        # 发送 UDP (直接使用预计算的值)
+                        try:
+                            data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
+                            udp_sender.send(data_str)
+                        except Exception as e:
+                            print(f"UDP Send Error: {e}")
+                    else:
+                         # 即使没有 gaze data (可能是 interval 跳过)，也要确保 tracker 状态被重置或保持
+                         # 这里我们假设如果没有数据，就不更新 tracker，保持上一帧的状态或者重置
+                         # 但如果是一直没有检测到人脸，tracker 应该 reset
+                         # 这里的逻辑是：如果是 ROI 模式但没有 gaze data，说明这一帧跳过了计算
+                         pass
 
-                        # 只有在解算视线且成功时才更新可视化数据
-                        if should_calc_gaze and results.get('eye_points') and len(results['eye_points']) == 2:
-                            latest_eye_points = results['eye_points']
-                            latest_raw_eye_points = results['raw_eye_points']
-                            rvec = results['rvec']
-                            tvec = results['tvec']
-                            
-                            # 准备视线可视化数据
-                            if VISUALIZE and rvec is not None and tvec is not None:
-                                # 优化：复用字典对象，仅更新变化的值
-                                gaze_data_container['rvec'] = rvec
-                                gaze_data_container['tvec'] = tvec
-                                gaze_data_container['rmat'] = results.get('rmat')
-                                latest_gaze_data = gaze_data_container
-                        else:
-                            # 非解算帧或失败，置空视线数据
-                            latest_gaze_data = None
-
-                    # 无论是否解算视线，都发送 UDP (Tracker 内部维护状态)
-                    try:
-                        # 优化：批量读取 tracker 属性
-                        est_dist, off_x, off_y = tracker.get_gaze_params()
-                        data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
-                        udp_sender.send(data_str)
-                    except Exception as e:
-                        print(f"UDP Send Error: {e}")
                 else:
                     tracker.reset()
             
@@ -410,8 +423,12 @@ def main():
             
         video_stream.stop()
         udp_sender.close()
-        shm_manager.close()
-        shm_manager.unlink() # 只有创建者 unlink
+        for mgr in shm_managers:
+            try:
+                mgr.close()
+                mgr.unlink() # 只有创建者 unlink
+            except:
+                pass
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

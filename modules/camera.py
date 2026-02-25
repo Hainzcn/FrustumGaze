@@ -92,13 +92,13 @@ class ConfigManager:
 
 # --- 视频流获取优化 (Producer) ---
 class WebcamVideoStream:
-    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_array=None):
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_arrays=None):
         self.src = src
         self.width = width
         self.height = height
         self.api_preference = api_preference
         self.exposure = exposure
-        self.shm_array = shm_array
+        self.shm_arrays = shm_arrays # list of shared memory arrays
         
         # 初始化摄像头
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
@@ -152,9 +152,13 @@ class WebcamVideoStream:
         self.t.start()
         return self
 
-    def set_shared_memory(self, shm_array):
-        """延迟设置共享内存"""
-        self.shm_array = shm_array
+    def set_shared_memory(self, shm_arrays):
+        """延迟设置共享内存 (支持双缓冲列表)"""
+        if isinstance(shm_arrays, list):
+             self.shm_arrays = shm_arrays
+        else:
+             # 兼容单个 array 的情况 (虽然不建议)
+             self.shm_arrays = [shm_arrays]
 
     def update(self):
         while True:
@@ -176,11 +180,16 @@ class WebcamVideoStream:
                 self.frame_id = 0
             
             # 如果配置了共享内存，直接写入
-            if self.shm_array is not None and frame is not None:
+            buffer_idx = -1
+            if self.shm_arrays is not None and frame is not None:
                 try:
+                    # 双缓冲逻辑: 根据 frame_id 奇偶性选择 buffer
+                    buffer_idx = self.frame_id % len(self.shm_arrays)
+                    target_shm = self.shm_arrays[buffer_idx]
+                    
                     # 确保尺寸匹配
-                    if frame.shape == self.shm_array.shape:
-                        np.copyto(self.shm_array, frame)
+                    if frame.shape == target_shm.shape:
+                        np.copyto(target_shm, frame)
                     else:
                         # 尺寸不匹配时，进行 resize 或 裁剪
                         pass 
@@ -195,11 +204,11 @@ class WebcamVideoStream:
                     pass
             
             try:
-                # 如果使用共享内存，队列中只放 (None, frame_id) 以减少拷贝
-                if self.shm_array is not None:
-                    self.frame_queue.put((None, self.frame_id), block=False)
+                # 如果使用共享内存，队列中只放 (None, frame_id, buffer_idx) 以减少拷贝
+                if self.shm_arrays is not None:
+                    self.frame_queue.put((None, self.frame_id, buffer_idx), block=False)
                 else:
-                    self.frame_queue.put((frame, self.frame_id), block=False)
+                    self.frame_queue.put((frame, self.frame_id, -1), block=False)
             except queue.Full:
                 pass # Should not happen if we just removed one, but safe guard
 
@@ -208,7 +217,7 @@ class WebcamVideoStream:
         try:
             return True, self.frame_queue.get_nowait()
         except queue.Empty:
-            return False, (None, -1)
+            return False, (None, -1, -1)
     
     def get(self, propId):
         return self.stream.get(propId)

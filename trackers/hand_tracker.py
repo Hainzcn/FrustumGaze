@@ -45,12 +45,12 @@ class HandDetectionResultLite:
                 self.multi_handedness.append(simple_handedness)
 
 class HandProcessorProcess(multiprocessing.Process):
-    def __init__(self, input_queue, output_queue, stop_event, shm_name, frame_shape, fov=60.0):
+    def __init__(self, input_queue, output_queue, stop_event, shm_names, frame_shape, fov=60.0):
         super().__init__()
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.stop_event = stop_event
-        self.shm_name = shm_name
+        self.shm_names = shm_names # List of names
         self.frame_shape = frame_shape
         self.fov = fov
         self.daemon = True
@@ -456,12 +456,21 @@ class HandProcessorProcess(multiprocessing.Process):
     def run(self):
         # --- 在子进程中初始化资源 ---
         
-        # 1. 连接共享内存
-        try:
-            shm_manager, shm_array = get_shared_array(self.shm_name, self.frame_shape)
-        except Exception as e:
-            print(f"HandProcessorProcess: Failed to connect to shared memory: {e}")
-            return
+        # 1. 连接共享内存 (双缓冲)
+        self.shm_managers = []
+        self.shm_arrays = []
+        
+        # 兼容旧代码传入单个 name 的情况
+        names = self.shm_names if isinstance(self.shm_names, list) else [self.shm_names]
+        
+        for name in names:
+            try:
+                mgr, arr = get_shared_array(name, self.frame_shape)
+                self.shm_managers.append(mgr)
+                self.shm_arrays.append(arr)
+            except Exception as e:
+                print(f"HandProcessorProcess: Failed to connect to shared memory {name}: {e}")
+                return
 
         # 2. 初始化 MediaPipe Hands (Tasks API)
         try:
@@ -515,10 +524,14 @@ class HandProcessorProcess(multiprocessing.Process):
                 # 阻塞等待任务
                 task = self.input_queue.get(timeout=0.1)
                 frame_id = task['frame_id']
+                buffer_idx = task.get('buffer_idx', 0)
                 
                 # 从共享内存复制图像数据
                 # 优化：直接使用共享内存，避免全量拷贝
-                frame = shm_array
+                if buffer_idx < len(self.shm_arrays):
+                    frame = self.shm_arrays[buffer_idx]
+                else:
+                    frame = self.shm_arrays[0]
                 
                 # 获取原始分辨率
                 h, w = frame.shape[:2]
@@ -738,4 +751,8 @@ class HandProcessorProcess(multiprocessing.Process):
 
         # 清理
         detector.close()
-        shm_manager.close()
+        for mgr in self.shm_managers:
+            try:
+                mgr.close()
+            except:
+                pass
