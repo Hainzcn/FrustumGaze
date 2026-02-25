@@ -67,12 +67,12 @@ P_INNER_EYE_DIST_MM = 40.0   # 双眼内眼角间距 (标准值: ~30-35mm) - 用
 
 # 2. 垂直距离参数 (相对于鼻尖)
 P_NOSE_TO_CHIN_MM = 80.0     # 鼻尖到下巴尖的垂直距离
-P_NOSE_TO_EYE_Y_MM = 50.0    # 鼻尖到眼睛中心线的垂直高度
+P_NOSE_TO_EYE_Y_MM = 45.0    # 鼻尖到眼睛中心线的垂直高度
 P_NOSE_TO_MOUTH_Y_MM = 40.0  # 鼻尖到嘴角的垂直距离
 
 # 3. 深度/前后参数 (相对于鼻尖，鼻尖 Z=0，面部其他部分 Z<0)
-P_EYE_Z_OFFSET_MM = 30.0     # 眼睛所在的深度平面 (后缩)
-P_MOUTH_Z_OFFSET_MM = 30.0   # 嘴角所在的深度平面
+P_EYE_Z_OFFSET_MM = 25.0     # 眼睛所在的深度平面 (后缩)
+P_MOUTH_Z_OFFSET_MM = 25.0   # 嘴角所在的深度平面
 P_CHIN_Z_OFFSET_MM = 30.0    # 下巴尖所在的深度平面
 
 # 4. 口部宽度
