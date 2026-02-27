@@ -32,7 +32,7 @@ class Visualizer:
             (0, 17)
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, p99_latency=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
         """
         统一渲染入口
         """
@@ -88,7 +88,7 @@ class Visualizer:
             pass
         
         # 4. 绘制所有覆盖信息 (Info, Gaze Lines, Crosshair)
-        self._draw_overlay(frame, tracker, fps, drop_rate)
+        self._draw_overlay(frame, tracker, fps, drop_rate, p99_latency)
 
         # 5. 显示并处理按键
         cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
@@ -307,7 +307,7 @@ class Visualizer:
             self.cached_viz_data['text'] = "Gaze on Screen: N/A"
             self.cached_viz_data['text_color'] = (0, 0, 255)
 
-    def _draw_overlay(self, frame, tracker, fps, drop_rate=0.0):
+    def _draw_overlay(self, frame, tracker, fps, drop_rate=0.0, p99_latency=0.0):
         h, w = frame.shape[:2]
         
         # 绘制视线向量和交点信息 (使用缓存的数据，消除闪烁)
@@ -328,7 +328,7 @@ class Visualizer:
         if drop_rate > 0.1: drop_color = (0, 255, 255) # Yellow
         if drop_rate > 0.3: drop_color = (0, 0, 255) # Red
         
-        info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}%"
+        info_text = f"FPS: {int(fps)} | Drop: {drop_rate*100:.1f}% | P99: {int(p99_latency)}ms"
         cv2.putText(frame, info_text, (10, 25), self.FONT, self.FONT_SCALE_INFO, drop_color, self.FONT_THICKNESS)
         
         # 绘制头部位置信息

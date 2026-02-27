@@ -1,16 +1,20 @@
 import time
 from collections import deque
+import numpy as np
 
 class StatsManager:
-    """性能统计管理器：负责计算 FPS 和任务丢包率"""
-    def __init__(self, fps_window_size=30, drop_rate_interval=1.0):
+    """性能统计管理器：负责计算 FPS、任务丢包率及 P99 延迟"""
+    def __init__(self, fps_window_size=30, drop_rate_interval=1.0, latency_window_size=100):
         self.fps_window_size = fps_window_size
         self.drop_rate_interval = drop_rate_interval
+        self.latency_window_size = latency_window_size
         
         # FPS 计算相关
         self.fps_history = deque(maxlen=fps_window_size)
+        self.frame_intervals = deque(maxlen=latency_window_size) # 存储帧间隔(ms)用于计算 P99
         self.prev_frame_time = 0
         self.latest_fps = 0.0
+        self.latest_p99_latency = 0.0
         
         # 丢包率计算相关
         self.stat_start_time = time.time()
@@ -23,15 +27,25 @@ class StatsManager:
         self.drop_rate = 0.0
 
     def update_fps(self):
-        """更新并返回当前 FPS"""
+        """更新并返回当前 FPS 和 P99 延迟"""
         new_frame_time = time.time()
         if self.prev_frame_time > 0:
             delta = new_frame_time - self.prev_frame_time
             if delta > 0:
                 instant_fps = 1.0 / delta
                 self.fps_history.append(instant_fps)
+                
+                # 记录帧间隔 (ms)
+                self.frame_intervals.append(delta * 1000.0)
+                
                 if len(self.fps_history) > 0:
                     self.latest_fps = sum(self.fps_history) / len(self.fps_history)
+                
+                # 计算 P99 延迟
+                if len(self.frame_intervals) > 0:
+                    # 使用 numpy 计算 P99，如果数据量大可以考虑采样
+                    self.latest_p99_latency = np.percentile(self.frame_intervals, 99)
+        
         self.prev_frame_time = new_frame_time
         return self.latest_fps
 
@@ -88,5 +102,6 @@ class StatsManager:
         return {
             'fps': self.latest_fps,
             'drop_rate': self.drop_rate,
+            'p99_latency': self.latest_p99_latency,
             'processed_count': self.stat_processed_count
         }

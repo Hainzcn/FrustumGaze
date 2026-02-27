@@ -442,6 +442,16 @@ class HandProcessorProcess(multiprocessing.Process):
         yaw = math.atan2(-R[2,0], math.sqrt(R[2,1]**2 + R[2,2]**2))
         yaw_deg = math.degrees(yaw)
         
+        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
+        if one_euro_filter_dict is not None and timestamp is not None:
+             if 'yaw' not in one_euro_filter_dict:
+                 one_euro_filter_dict['yaw'] = OneEuroFilter(
+                     min_cutoff=settings.HAND_YAW_ONE_EURO_MIN_CUTOFF, 
+                     beta=settings.HAND_YAW_ONE_EURO_BETA,
+                     d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
+                 )
+             yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
+        
         # 为了兼容旧逻辑，计算 w_norm 作为某种置信度或调试信息
         dx = landmarks[5].x - landmarks[17].x
         dy = (landmarks[5].y - landmarks[17].y) * (1.0 / aspect_ratio)

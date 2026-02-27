@@ -378,6 +378,7 @@ class FrustumGazePipeline:
                 self.latest_gaze_data,
                 hand_result=self.latest_hand_result,
                 drop_rate=stats['drop_rate'],
+                p99_latency=stats.get('p99_latency', 0.0),
                 hands_pos=self.latest_hands_pos,
                 closest_hand=self.latest_closest_hand,
                 using_full_scan=self.latest_using_full_scan

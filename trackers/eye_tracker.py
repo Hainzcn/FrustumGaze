@@ -180,6 +180,14 @@ class EyeTracker:
         # 优化：传递 current_time
         pitch, yaw, roll, rvec, tvec, rmat = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, current_time)
         
+        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
+        yaw = self._get_filter(
+            'head_yaw', yaw, current_time,
+            min_cutoff=settings.FACE_YAW_ONE_EURO_MIN_CUTOFF, 
+            beta=settings.FACE_YAW_ONE_EURO_BETA,
+            d_cutoff=settings.FACE_YAW_ONE_EURO_D_CUTOFF
+        )
+
         # 4. Apply correction and filtering
         correction_factor = math.cos(math.radians(yaw))
         if correction_factor < 0.2: correction_factor = 0.2
