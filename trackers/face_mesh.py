@@ -116,8 +116,8 @@ class FrameProcessorProcess(multiprocessing.Process):
                 # 检查是否需要处理
                 should_process = True
                 if self.last_landmarks_norm is None:
-                     if frame_id % settings.FULL_SCAN_INTERVAL != 0:
-                         should_process = False
+                    if frame_id % settings.FULL_SCAN_INTERVAL != 0:
+                        should_process = False
 
                 if not should_process:
                     continue
@@ -192,9 +192,9 @@ class FrameProcessorProcess(multiprocessing.Process):
                 processed_gaze_data = None
                 
                 if self.using_full_scan and detection_result.face_landmarks:
-                     # 构造一个空的 Result，或者包含特定标志
-                     result_lite = DetectionResultLite([]) # 空的关键点列表
-                     tracker.reset() # 丢失跟踪时重置滤波器
+                    # 构造一个空的 Result，或者包含特定标志
+                    result_lite = DetectionResultLite([]) # 空的关键点列表
+                    tracker.reset() # 丢失跟踪时重置滤波器
                 elif not self.using_full_scan and detection_result.face_landmarks:
                     # 正常 ROI 模式，返回完整结果
                     result_lite = DetectionResultLite(detection_result.face_landmarks)

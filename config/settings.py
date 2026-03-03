@@ -102,17 +102,17 @@ P_MOUTH_WIDTH_MM = 50.0      # 嘴角间距
 # Index (食指), Middle (中指), Ring (无名指), Pinky (小指)
 
 # 垂直高度 (Y轴)
-P_WRIST_TO_INDEX_MCP_Y_MM = 75.0
-P_WRIST_TO_MIDDLE_MCP_Y_MM = 80.0
-P_WRIST_TO_RING_MCP_Y_MM = 75.0
-P_WRIST_TO_PINKY_MCP_Y_MM = 65.0
+P_WRIST_TO_INDEX_MCP_Y_MM = 95.0
+P_WRIST_TO_MIDDLE_MCP_Y_MM = 95.0
+P_WRIST_TO_RING_MCP_Y_MM = 90.0
+P_WRIST_TO_PINKY_MCP_Y_MM = 80.0
 
 # 水平偏移 (X轴) - 相对于手腕中心
 # 假设右手手心朝前: 小指在左(-), 食指/拇指在右(+)
 P_WRIST_TO_INDEX_MCP_X_MM = 25.0
 P_WRIST_TO_MIDDLE_MCP_X_MM = 5.0
-P_WRIST_TO_RING_MCP_X_MM = -15.0
-P_WRIST_TO_PINKY_MCP_X_MM = -35.0
+P_WRIST_TO_RING_MCP_X_MM = -10.0
+P_WRIST_TO_PINKY_MCP_X_MM = -30.0
 
 # 深度偏移 (Z轴) - 假设 MCP 关节稍微前倾或在一个平面
 P_HAND_MCP_Z_OFFSET_MM = 0.0

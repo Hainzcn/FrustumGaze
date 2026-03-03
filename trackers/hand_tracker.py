@@ -288,25 +288,25 @@ class HandProcessorProcess(multiprocessing.Process):
         p17_x, p17_y = landmarks[17].x, landmarks[17].y
         
         if one_euro_filter_dict is not None and timestamp is not None:
-             def get_filtered_val(name, val):
-                 if name not in one_euro_filter_dict:
-                     one_euro_filter_dict[name] = OneEuroFilter(
-                         min_cutoff=settings.HAND_POS_ONE_EURO_MIN_CUTOFF, 
-                         beta=settings.HAND_POS_ONE_EURO_BETA,
-                         d_cutoff=settings.HAND_POS_ONE_EURO_D_CUTOFF
-                     )
-                 return one_euro_filter_dict[name].filter(val, timestamp)
-             
-             p0_x = get_filtered_val('p0_x', p0_x)
-             p0_y = get_filtered_val('p0_y', p0_y)
-             p5_x = get_filtered_val('p5_x', p5_x)
-             p5_y = get_filtered_val('p5_y', p5_y)
-             p9_x = get_filtered_val('p9_x', p9_x)
-             p9_y = get_filtered_val('p9_y', p9_y)
-             p13_x = get_filtered_val('p13_x', p13_x)
-             p13_y = get_filtered_val('p13_y', p13_y)
-             p17_x = get_filtered_val('p17_x', p17_x)
-             p17_y = get_filtered_val('p17_y', p17_y)
+            def get_filtered_val(name, val):
+                if name not in one_euro_filter_dict:
+                    one_euro_filter_dict[name] = OneEuroFilter(
+                        min_cutoff=settings.HAND_POS_ONE_EURO_MIN_CUTOFF, 
+                        beta=settings.HAND_POS_ONE_EURO_BETA,
+                        d_cutoff=settings.HAND_POS_ONE_EURO_D_CUTOFF
+                    )
+                return one_euro_filter_dict[name].filter(val, timestamp)
+            
+            p0_x = get_filtered_val('p0_x', p0_x)
+            p0_y = get_filtered_val('p0_y', p0_y)
+            p5_x = get_filtered_val('p5_x', p5_x)
+            p5_y = get_filtered_val('p5_y', p5_y)
+            p9_x = get_filtered_val('p9_x', p9_x)
+            p9_y = get_filtered_val('p9_y', p9_y)
+            p13_x = get_filtered_val('p13_x', p13_x)
+            p13_y = get_filtered_val('p13_y', p13_y)
+            p17_x = get_filtered_val('p17_x', p17_x)
+            p17_y = get_filtered_val('p17_y', p17_y)
 
         # 2D Image Points
         image_points = np.array([
@@ -354,7 +354,7 @@ class HandProcessorProcess(multiprocessing.Process):
 
             success = n_solutions > 0
         except Exception:
-             success = False
+            success = False
 
         # Fallback: 如果 IPPE 失败，尝试 ITERATIVE (使用所有 5 个点)
         if not success:
@@ -444,13 +444,13 @@ class HandProcessorProcess(multiprocessing.Process):
         
         # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
         if one_euro_filter_dict is not None and timestamp is not None:
-             if 'yaw' not in one_euro_filter_dict:
-                 one_euro_filter_dict['yaw'] = OneEuroFilter(
-                     min_cutoff=settings.HAND_YAW_ONE_EURO_MIN_CUTOFF, 
-                     beta=settings.HAND_YAW_ONE_EURO_BETA,
-                     d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
-                 )
-             yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
+            if 'yaw' not in one_euro_filter_dict:
+                one_euro_filter_dict['yaw'] = OneEuroFilter(
+                    min_cutoff=settings.HAND_YAW_ONE_EURO_MIN_CUTOFF, 
+                    beta=settings.HAND_YAW_ONE_EURO_BETA,
+                    d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
+                )
+            yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
         
         # 为了兼容旧逻辑，计算 w_norm 作为某种置信度或调试信息
         dx = landmarks[5].x - landmarks[17].x
