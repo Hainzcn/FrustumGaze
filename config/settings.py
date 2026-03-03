@@ -89,6 +89,34 @@ P_CHIN_Z_OFFSET_MM = 30.0    # 下巴尖所在的深度平面
 # 4. 口部宽度
 P_MOUTH_WIDTH_MM = 50.0      # 嘴角间距
 
+# --- 3D Hand Model & Physical Parameters ---
+# 用户可配置的真实手部物理参数 (单位: mm)
+# 用于构建 solvePnP 的 3D 手部模型点
+# 坐标系定义: 以手腕(Wrist)为原点
+# 默认右手模型: 手心朝向相机，手指向上
+# X轴: 水平向右 (拇指方向)
+# Y轴: 垂直向上 (手指方向)
+# Z轴: 垂直手掌向外 (指向相机)
+
+# 手腕到各指根关节(MCP)的距离估计
+# Index (食指), Middle (中指), Ring (无名指), Pinky (小指)
+
+# 垂直高度 (Y轴)
+P_WRIST_TO_INDEX_MCP_Y_MM = 75.0
+P_WRIST_TO_MIDDLE_MCP_Y_MM = 80.0
+P_WRIST_TO_RING_MCP_Y_MM = 75.0
+P_WRIST_TO_PINKY_MCP_Y_MM = 65.0
+
+# 水平偏移 (X轴) - 相对于手腕中心
+# 假设右手手心朝前: 小指在左(-), 食指/拇指在右(+)
+P_WRIST_TO_INDEX_MCP_X_MM = 25.0
+P_WRIST_TO_MIDDLE_MCP_X_MM = 5.0
+P_WRIST_TO_RING_MCP_X_MM = -15.0
+P_WRIST_TO_PINKY_MCP_X_MM = -35.0
+
+# 深度偏移 (Z轴) - 假设 MCP 关节稍微前倾或在一个平面
+P_HAND_MCP_Z_OFFSET_MM = 0.0
+
 # --- Derived Model Points (Do Not Edit Directly) ---
 # 构建 3D 坐标系: 
 # Origin (0,0,0) at Nose Tip
@@ -120,6 +148,41 @@ MODEL_POINTS = np.array([
     (-_x_mouth, _y_mouth, _z_mouth),  # Left mouth corner
     (_x_mouth, _y_mouth, _z_mouth)    # Right mouth corner
 ], dtype="double")
+
+# --- Derived Hand Model Points ---
+# 1. 缩放: 将 mm 转换为 Model Units
+_hand_idx_x = P_WRIST_TO_INDEX_MCP_X_MM * MODEL_SCALE
+_hand_idx_y = P_WRIST_TO_INDEX_MCP_Y_MM * MODEL_SCALE
+
+_hand_mid_x = P_WRIST_TO_MIDDLE_MCP_X_MM * MODEL_SCALE
+_hand_mid_y = P_WRIST_TO_MIDDLE_MCP_Y_MM * MODEL_SCALE
+
+_hand_ring_x = P_WRIST_TO_RING_MCP_X_MM * MODEL_SCALE
+_hand_ring_y = P_WRIST_TO_RING_MCP_Y_MM * MODEL_SCALE
+
+_hand_pinky_x = P_WRIST_TO_PINKY_MCP_X_MM * MODEL_SCALE
+_hand_pinky_y = P_WRIST_TO_PINKY_MCP_Y_MM * MODEL_SCALE
+
+_hand_mcp_z = P_HAND_MCP_Z_OFFSET_MM * MODEL_SCALE
+
+# 2. 构建 3D 点集 (用于 solvePnP)
+# 对应 MediaPipe Hands 关键点索引:
+# 0: Wrist
+# 5: Index Finger MCP
+# 9: Middle Finger MCP
+# 13: Ring Finger MCP
+# 17: Pinky MCP
+
+HAND_MODEL_POINTS = np.array([
+    (0.0, 0.0, 0.0),                      # 0: Wrist
+    (_hand_idx_x, _hand_idx_y, _hand_mcp_z),     # 5: Index MCP
+    (_hand_mid_x, _hand_mid_y, _hand_mcp_z),     # 9: Middle MCP
+    (_hand_ring_x, _hand_ring_y, _hand_mcp_z),   # 13: Ring MCP
+    (_hand_pinky_x, _hand_pinky_y, _hand_mcp_z)  # 17: Pinky MCP
+], dtype="double")
+
+# 对应的关键点索引 (用于从检测结果中提取 2D 点)
+HAND_MODEL_INDICES = [0, 5, 9, 13, 17]
 
 # Eye Centers in Model Space
 # 估算眼球中心位置 (比外眼角更靠内，深度更深)
