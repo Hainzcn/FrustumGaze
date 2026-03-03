@@ -40,10 +40,20 @@ FrustumGaze/
 │   ├── Camera/             # 虚拟相机控制
 │   └── Character/          # 角色眼动控制
 ├── utils/                  # 通用工具函数
-├── face_landmarker.task    # MediaPipe 模型文件
-├── hand_landmarker.task    # MediaPipe 模型文件
+├── models/                 # MediaPipe 模型文件
+│   ├── face_landmarker.task
+│   └── hand_landmarker.task
 └── main.py                 # 启动脚本
 ```
+
+## 📚 技术文档
+
+详细的开发与使用文档请参考 `docs/` 目录：
+
+*   [系统架构 (Architecture)](docs/architecture.md): 多进程设计、数据流与共享内存机制。
+*   [API 参考 (API Reference)](docs/api_reference.md): 核心类与函数说明。
+*   [安装与配置 (Setup Guide)](docs/setup_guide.md): 环境搭建与运行指南。
+*   [常见问题排查 (Troubleshooting)](docs/troubleshooting.md): 常见错误与解决方案。
 
 ## 🚀 应用前景
 

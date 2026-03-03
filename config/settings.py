@@ -1,4 +1,5 @@
 
+import os
 import numpy as np
 
 # Visualization
@@ -160,8 +161,8 @@ HAND_MIN_PRESENCE_CONFIDENCE = 0.5
 HAND_MIN_TRACKING_CONFIDENCE = 0.5
 
 # Model Paths
-FACE_MESH_TASK_PATH = 'face_landmarker.task'
-HAND_LANDMARKER_TASK_PATH = 'hand_landmarker.task'
+FACE_MESH_TASK_PATH = os.path.join('models', 'face_landmarker.task')
+HAND_LANDMARKER_TASK_PATH = os.path.join('models', 'hand_landmarker.task')
 
 # --- Image Preprocessing ---
 PREPROCESS_TARGET_HEIGHT = 1080  # 预处理目标高度
