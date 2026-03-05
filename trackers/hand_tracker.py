@@ -25,6 +25,7 @@ class HandDetectionResultLite:
     def __init__(self, hand_landmarks_list, handedness_list=None):
         self.multi_hand_landmarks = []
         self.multi_handedness = []
+        
         if hand_landmarks_list:
             for landmarks in hand_landmarks_list:
                 simple_landmarks = []
@@ -563,13 +564,16 @@ class HandProcessorProcess(multiprocessing.Process):
                 
                 # processed_rgb = GlobalImagePreprocessor.to_rgb(frame) # 移除：延迟转换
                 
+                timestamp_ms = int(time.time() * 1000)
+
                 # --- ROI 处理逻辑 ---
                 roi_info = None # (roi_x, roi_y, roi_w, roi_h) in processed_rgb pixel coords
                 processed_rgb = None
                 
                 # 检查是否需要进行全图扫描 (ROI 不存在，或者间隔达到)
-                should_process = True
+                should_process_hand = True
                 
+                # 1. 尝试 ROI 模式
                 if self.roi:
                     # ROI 模式：仅获取 ROI 区域 (注意这里使用 BGR)
                     # 先从原始 BGR 帧裁剪
@@ -585,23 +589,30 @@ class HandProcessorProcess(multiprocessing.Process):
                         self.roi = None
                         self.roi_miss_count = 0
                 
-                if not roi_info:
-                    # 全图模式
-                    # 检查全图扫描频率
-                    if frame_id % settings.FULL_SCAN_INTERVAL != 0:
-                        should_process = False
-                    else:
-                        # 如果是全图扫描帧，先降分辨率 (BGR)
-                        resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(target_w, target_h))
-                        # 再转换 RGB
-                        processed_rgb = GlobalImagePreprocessor.to_rgb(resized_bgr)
+                # 2. 准备全图图像 (如果手部全图扫描)
+                need_full_frame = (not self.roi and frame_id % settings.FULL_SCAN_INTERVAL == 0)
+                processed_rgb_full = None
                 
-                timestamp_ms = int(time.time() * 1000)
+                if need_full_frame:
+                    resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(target_w, target_h))
+                    processed_rgb_full = GlobalImagePreprocessor.to_rgb(resized_bgr)
+                    # 全图也进行模糊处理
+                    processed_rgb_full = GlobalImagePreprocessor.apply_gaussian_blur(processed_rgb_full, kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE, sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
+                
+                # 3. 如果没有 ROI，使用全图作为手部检测输入
+                if not self.roi:
+                    if processed_rgb_full is not None:
+                        processed_rgb = processed_rgb_full
+                    else:
+                        should_process_hand = False
+                
                 mapped_landmarks_list = []
                 
-                if should_process and processed_rgb is not None:
+                if should_process_hand and processed_rgb is not None:
                     # 3. 高斯模糊 (对 ROI 或 全图 都应用)
-                    processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(processed_rgb, kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE, sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
+                    # 如果是 ROI 图像，需要单独模糊 (全图已经模糊过了)
+                    if processed_rgb is not processed_rgb_full:
+                        processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(processed_rgb, kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE, sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
                     
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=processed_rgb)
                     
@@ -671,7 +682,7 @@ class HandProcessorProcess(multiprocessing.Process):
                 filtered_landmarks = []
                 filtered_handedness = []
                 
-                if should_process and 'detection_result' in locals():
+                if should_process_hand and 'detection_result' in locals():
                     filtered_landmarks, filtered_handedness = self._filter_overlapping_hands(
                         mapped_landmarks_list, 
                         detection_result.handedness

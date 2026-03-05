@@ -32,7 +32,7 @@ class Visualizer:
             (0, 17)
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, drop_rate=0.0, p99_latency=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
+    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, pose_result=None, drop_rate=0.0, p99_latency=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
         """
         统一渲染入口
         """
@@ -48,9 +48,10 @@ class Visualizer:
             mode_text = "FULL SCAN - SEARCHING" if using_full_scan else "ROI MODE - TRACKING"
             cv2.putText(frame, mode_text, (roi_x, max(20, roi_y - 10)), self.FONT, 0.5, color, 1)
 
-        # 1. 绘制手部关键点
-        if hand_result:
-            self.draw_hands(frame, hand_result, hands_pos, closest_hand)
+        # 1. 绘制手部和姿态关键点
+        # 即使 hand_result 为 None，如果 pose_result 有值也应该绘制
+        if hand_result or pose_result:
+            self.draw_hands(frame, hand_result, pose_result, hands_pos, closest_hand)
         
         # 如果是全图扫描模式，仅绘制 ROI 框，不绘制后续的面部细节
         if using_full_scan:
@@ -94,14 +95,48 @@ class Visualizer:
         cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
         return cv2.waitKey(1) & 0xFF == 27 # Returns True if ESC pressed
 
-    def draw_hands(self, frame, hand_result, hands_pos=None, closest_hand=None):
+    def draw_hands(self, frame, hand_result, pose_result=None, hands_pos=None, closest_hand=None):
         """
         绘制手部关键点 (已优化)
         """
+        h, w = frame.shape[:2]
+
+        # Draw Pose Landmarks (Shoulders, Elbows)
+        # 11: Left Shoulder, 12: Right Shoulder
+        # 13: Left Elbow, 14: Right Elbow
+        # PoseTracker extracts 11, 12, 13, 14 (in this order)
+        
+        pose_px = []
+        left_elbow_px = None
+        right_elbow_px = None
+
+        if pose_result and pose_result.pose_landmarks:
+             pose_lms = pose_result.pose_landmarks
+             # Convert to pixels
+             for lm in pose_lms:
+                 pose_px.append((int(lm.x * w), int(lm.y * h)))
+             
+             if len(pose_px) >= 4:
+                 # Shoulders: 0 (Left), 1 (Right)
+                 # Elbows: 2 (Left), 3 (Right)
+                 
+                 # Draw Shoulders Connection
+                 cv2.line(frame, pose_px[0], pose_px[1], (255, 255, 0), 2)
+                 
+                 # Draw Left Arm (Shoulder -> Elbow)
+                 cv2.line(frame, pose_px[0], pose_px[2], (255, 255, 0), 2)
+                 left_elbow_px = pose_px[2]
+                 
+                 # Draw Right Arm (Shoulder -> Elbow)
+                 cv2.line(frame, pose_px[1], pose_px[3], (255, 255, 0), 2)
+                 right_elbow_px = pose_px[3]
+                 
+                 # Draw Points
+                 for px in pose_px:
+                     cv2.circle(frame, px, 5, (255, 0, 0), -1) # Blue
+
         if not hand_result or not hand_result.multi_hand_landmarks:
             return
-
-        h, w = frame.shape[:2]
         
         # 优化: 预处理 hands_pos 为字典 O(1) 查找
         hands_pos_map = {}
@@ -113,6 +148,7 @@ class Visualizer:
             is_pinching = False
             pinch_pos = (0,0,0)
             pinch_center_2d = (0,0)
+            hand_label = "Unknown"
             
             # 优化: 直接字典查找
             hand_pos = hands_pos_map.get(idx)
@@ -120,11 +156,19 @@ class Visualizer:
                 is_pinching = hand_pos.get('is_pinching', False)
                 pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
                 pinch_center_2d = hand_pos.get('pinch_center_2d', (0,0))
+                hand_label = hand_pos.get('label', "Unknown")
 
             # 优化: 预计算所有关键点像素坐标，避免重复 float->int 转换和乘法
             landmarks_px = []
             for lm in hand_landmarks_lite:
                 landmarks_px.append((int(lm.x * w), int(lm.y * h)))
+
+            # Draw Connection from Elbow to Wrist (Index 0)
+            wrist_px = landmarks_px[0]
+            if hand_label == "Left" and left_elbow_px:
+                 cv2.line(frame, left_elbow_px, wrist_px, (255, 255, 0), 2)
+            elif hand_label == "Right" and right_elbow_px:
+                 cv2.line(frame, right_elbow_px, wrist_px, (255, 255, 0), 2)
 
             # Draw connections
             for connection in self.HAND_CONNECTIONS:

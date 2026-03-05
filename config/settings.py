@@ -9,6 +9,7 @@ VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计
 # 设置为 1 表示每一帧都处理
 EYE_TRACKING_INTERVAL = 1
 HAND_TRACKING_INTERVAL = 1 # 手部追踪频率 (每多少帧进行一次手部检测)
+POSE_TRACKING_INTERVAL = 6 # 姿态追踪频率 (每多少帧进行一次姿态检测)
 EYE_GAZE_CALCULATION_INTERVAL = 2 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
 GAZE_RENDER_INTERVAL = 2 # 视线线段渲染频率 (每多少帧更新一次)
 FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
@@ -223,9 +224,14 @@ HAND_MIN_DETECTION_CONFIDENCE = 0.5
 HAND_MIN_PRESENCE_CONFIDENCE = 0.5
 HAND_MIN_TRACKING_CONFIDENCE = 0.5
 
+POSE_MIN_DETECTION_CONFIDENCE = 0.5
+POSE_MIN_PRESENCE_CONFIDENCE = 0.5
+POSE_MIN_TRACKING_CONFIDENCE = 0.5
+
 # Model Paths
 FACE_MESH_TASK_PATH = os.path.join('models', 'face_landmarker.task')
 HAND_LANDMARKER_TASK_PATH = os.path.join('models', 'hand_landmarker.task')
+POSE_LANDMARKER_TASK_PATH = os.path.join('models', 'pose_landmarker.task')
 
 # --- Image Preprocessing ---
 PREPROCESS_TARGET_HEIGHT = 1080  # 预处理目标高度

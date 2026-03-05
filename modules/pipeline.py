@@ -6,7 +6,7 @@ import multiprocessing
 import sys
 from collections import deque
 
-from config.settings import VISUALIZE, UDP_IP, UDP_PORT, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL
+from config.settings import VISUALIZE, UDP_IP, UDP_PORT, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL, POSE_TRACKING_INTERVAL
 from modules.camera import CameraModel, ConfigManager, WebcamVideoStream, select_camera_device, select_resolution
 from modules.network import UDPSender
 from modules.visualizer import Visualizer
@@ -16,6 +16,7 @@ from utils.image_utils import ImagePreprocessor
 from trackers.eye_tracker import EyeTracker
 from trackers.face_mesh import FrameProcessorProcess
 from trackers.hand_tracker import HandProcessorProcess
+from trackers.pose_tracker import PoseProcessorProcess
 
 class FrustumGazePipeline:
     def __init__(self):
@@ -27,6 +28,8 @@ class FrustumGazePipeline:
         self.output_queue = multiprocessing.Queue(maxsize=2)
         self.hand_input_queue = multiprocessing.Queue(maxsize=2)
         self.hand_output_queue = multiprocessing.Queue(maxsize=2)
+        self.pose_input_queue = multiprocessing.Queue(maxsize=2)
+        self.pose_output_queue = multiprocessing.Queue(maxsize=2)
         self.stop_event = multiprocessing.Event()
         
         # 管理器
@@ -54,6 +57,7 @@ class FrustumGazePipeline:
         # 子进程
         self.face_process = None
         self.hand_process = None
+        self.pose_process = None
         
         # 状态
         self.running = False
@@ -64,6 +68,7 @@ class FrustumGazePipeline:
         self.latest_hands_pos = None
         self.latest_closest_hand = None
         self.latest_face_result = None
+        self.latest_pose_result = None
         self.latest_roi_info = None
         self.latest_using_full_scan = False
         self.latest_eye_points = []
@@ -72,6 +77,7 @@ class FrustumGazePipeline:
         
         # 帧计数器
         self.hand_frame_counter = 0
+        self.pose_frame_counter = 0
         self.eye_frame_counter = 0
         
         # 视线数据容器 (用于复用)
@@ -200,6 +206,16 @@ class FrustumGazePipeline:
             fov=self.camera_fov
         )
         self.hand_process.start()
+        
+        self.pose_process = PoseProcessorProcess(
+            self.pose_input_queue,
+            self.pose_output_queue,
+            self.stop_event,
+            self.shm_names,
+            self.frame_shape
+        )
+        self.pose_process.start()
+
         print("Pipeline started: Capture(Thread) -> SharedMem -> Process(Process) -> Main Loop")
 
     def stop(self):
@@ -217,6 +233,11 @@ class FrustumGazePipeline:
             self.hand_process.join(timeout=2.0)
             if self.hand_process.is_alive():
                 self.hand_process.terminate()
+
+        if self.pose_process:
+            self.pose_process.join(timeout=2.0)
+            if self.pose_process.is_alive():
+                self.pose_process.terminate()
             
         if self.video_stream:
             self.video_stream.stop()
@@ -243,6 +264,7 @@ class FrustumGazePipeline:
             while self.running:
                 self._process_frame()
                 self._check_hand_results()
+                self._check_pose_results()
                 self._check_face_results()
                 self._update_stats()
                 
@@ -288,6 +310,14 @@ class FrustumGazePipeline:
                 except queue.Full:
                     self.stats_manager.record_hand_task_dropped()
 
+            # 分发姿态追踪任务
+            self.pose_frame_counter = (self.pose_frame_counter + 1) % POSE_TRACKING_INTERVAL
+            if self.pose_frame_counter == 0:
+                try:
+                    self.pose_input_queue.put({'frame_id': frame_id, 'buffer_idx': buffer_idx}, block=False)
+                except queue.Full:
+                    pass
+
     def _check_hand_results(self):
         """检查手部追踪结果"""
         try:
@@ -305,6 +335,14 @@ class FrustumGazePipeline:
                 
                 hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f}"
                 self.udp_sender.send(hand_str)
+        except queue.Empty:
+            pass
+
+    def _check_pose_results(self):
+        """检查姿态追踪结果"""
+        try:
+            pose_result_data = self.pose_output_queue.get_nowait()
+            self.latest_pose_result = pose_result_data.get('pose_result')
         except queue.Empty:
             pass
 
@@ -377,6 +415,7 @@ class FrustumGazePipeline:
                 stats['fps'], 
                 self.latest_gaze_data,
                 hand_result=self.latest_hand_result,
+                pose_result=self.latest_pose_result,
                 drop_rate=stats['drop_rate'],
                 p99_latency=stats.get('p99_latency', 0.0),
                 hands_pos=self.latest_hands_pos,
