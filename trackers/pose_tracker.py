@@ -11,17 +11,20 @@ from utils.image_utils import GlobalImagePreprocessor
 from config import settings
 
 class LandmarkLite:
-    def __init__(self, x, y, z):
+    def __init__(self, x, y, z, visibility=0.0):
         self.x = x
         self.y = y
         self.z = z
+        self.visibility = visibility
 
 class PoseDetectionResultLite:
     def __init__(self, pose_landmarks=None):
         self.pose_landmarks = [] # List of LandmarkLite (shoulders, elbows)
         if pose_landmarks:
             for lm in pose_landmarks:
-                 self.pose_landmarks.append(LandmarkLite(lm.x, lm.y, lm.z))
+                 # MediaPipe pose landmarks have visibility
+                 vis = getattr(lm, 'visibility', 1.0)
+                 self.pose_landmarks.append(LandmarkLite(lm.x, lm.y, lm.z, vis))
 
 class PoseProcessorProcess(multiprocessing.Process):
     def __init__(self, input_queue, output_queue, stop_event, shm_names, frame_shape):

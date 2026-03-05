@@ -236,5 +236,5 @@ POSE_LANDMARKER_TASK_PATH = os.path.join('models', 'pose_landmarker.task')
 # --- Image Preprocessing ---
 PREPROCESS_TARGET_HEIGHT = 1080  # 预处理目标高度
 PREPROCESS_ROI_SCALE_FACTOR = 1.0 # ROI 区域二次缩放比例
-PREPROCESS_GAUSSIAN_KERNEL_SIZE = (5, 5) # 高斯模糊核大小
+PREPROCESS_GAUSSIAN_KERNEL_SIZE = (3, 3) # 高斯模糊核大小
 PREPROCESS_GAUSSIAN_SIGMA = 0 # 高斯模糊 Sigma
