@@ -180,6 +180,26 @@ class EyeTracker:
         # 优化：传递 current_time
         pitch, yaw, roll, rvec, tvec, rmat = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, current_time)
         
+        # # [Modified] 使用 MediaPipe 空间位置参数推算用户头部偏航角
+        # # 替换 PnP 解算所得 yaw 角
+        # if 33 < len(face_landmarks) and 263 < len(face_landmarks):
+        #     # 提取左眼角(33)和右眼角(263)
+        #     lm_l = face_landmarks[33]
+        #     lm_r = face_landmarks[263]
+            
+        #     # MediaPipe Z 坐标与 X 坐标尺度一致 (Normalized)
+        #     # 计算向量差
+        #     dx = lm_r.x - lm_l.x
+        #     dz = lm_r.z - lm_l.z
+            
+        #     # 计算 Yaw 角 (degrees)
+        #     # 当右眼(263) Z 坐标大于左眼(33)时 (dz > 0)，表示右眼更远，即向右转 (Yaw > 0)
+        #     # 注意：atan2(y, x) -> atan2(dz, dx)
+        #     yaw_geo = math.degrees(math.atan2(dz, dx))
+            
+        #     # 替换 Yaw
+        #     yaw = yaw_geo
+
         # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
         yaw = self._get_filter(
             'head_yaw', yaw, current_time,

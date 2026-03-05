@@ -51,6 +51,7 @@ FrustumGaze/
 详细的开发与使用文档请参考 `docs/` 目录：
 
 *   [系统架构 (Architecture)](docs/architecture.md): 多进程设计、数据流与共享内存机制。
+*   [核心算法详解 (Algorithm Details)](docs/algorithm_details.md): 头部/手部空间位置计算与视线估算原理。
 *   [API 参考 (API Reference)](docs/api_reference.md): 核心类与函数说明。
 *   [安装与配置 (Setup Guide)](docs/setup_guide.md): 环境搭建与运行指南。
 *   [常见问题排查 (Troubleshooting)](docs/troubleshooting.md): 常见错误与解决方案。
