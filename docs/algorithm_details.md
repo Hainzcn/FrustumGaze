@@ -40,16 +40,22 @@
     *   应用 `OneEuroFilter` 对 2D 特征点进行初步平滑去抖。
 3.  **计算焦距**：
 设定虚拟焦距 $f$（基于视场角 FOV 计算）：
-$$ f = \frac{W / 2}{\tan(FOV / 2)} $$
+$$
+f = \frac{W / 2}{\tan(FOV / 2)}
+$$
 
 根据相似三角形关系：
-$$ Z = \frac{D_{real} \times f}{d_{pixel}} $$
+$$
+Z = \frac{D_{real} \times f}{d_{pixel}}
+$$
 
 *   $D_{real}$: 物理空间中的真实特征距离（如内外眼角间距，配置项 `P_OUTER_EYE_DIST_MM` 和 `P_INNER_EYE_DIST_MM`）。
 *   $d_{pixel}$: 图像空间中的观测像素距离。
 
     分别计算基于内眼角和外眼角的距离，依内外眼角关键点置信度取加权平均值：
-    $$ Z = \frac{w_{133} \times D_{133} + w_{362} \times D_{362} + w_{33} \times D_{33} + w_{263} \times D_{263}}{w_{133} + w_{362} + w_{33} + w_{263}} $$
+    $$
+    Z = \frac{w_{133} \times D_{133} + w_{362} \times D_{362} + w_{33} \times D_{33} + w_{263} \times D_{263}}{w_{133} + w_{362} + w_{33} + w_{263}}
+    $$
     其中 $w_{i}$ 是第 $i$ 个关键点的置信度，$D_{i}$ 是基于 $i$ 点的距离估算。
 
 #### 2.1.3 姿态补偿 (Pose Compensation)
@@ -73,7 +79,9 @@ $$ Z_{corrected} = Z \times \cos(\theta_{yaw}) $$
 #### 2.2.1 算法路径
 1.  **3D-2D 对应关系构建**：选取人脸 6 个刚性特征点（鼻尖、下巴、眼角、嘴角），建立其在通用 3D 人脸模型系下的坐标 $P_{model}$ 与当前图像观测坐标 $P_{image}$ 的映射。
 2.  **非线性优化求解**：使用 `cv2.solvePnP` 求解相机外参（旋转向量 $\vec{r}$ 和平移向量 $\vec{t}$），使得重投影误差 (Reprojection Error) 最小化：
-    $$ \min_{\mathbf{R}, \mathbf{t}} \sum_{i} \| P_{image}^{(i)} - \pi(\mathbf{R} P_{model}^{(i)} + \mathbf{t}) \|^2 $$
+    $$
+    \min_{\mathbf{R}, \mathbf{t}} \sum_{i} \| P_{image}^{(i)} - \pi(\mathbf{R} P_{model}^{(i)} + \mathbf{t}) \|^2
+    $$
     其中 $\pi$ 为投影函数。
 3.  **欧拉角转换**：利用罗德里格斯公式 (Rodrigues' Rotation Formula) 将旋转向量转换为旋转矩阵，再分解为欧拉角。
 4.  **滤波**对计算出的角度应用 `OneEuroFilter` 进行平滑处理。
