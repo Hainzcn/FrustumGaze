@@ -1,6 +1,6 @@
 # Python服务端 核心算法详解
 
-本文档详细描述了 FrustumGaze 项目中用于计算用户头部、手部空间位置以及视线方向的核心算法。
+本段详细描述了 FrustumGaze 项目中用于计算用户头部、手部空间位置以及视线方向的核心算法。
 
 ## 1. 坐标系定义与空间变换
 
@@ -13,7 +13,7 @@
 
 *   **归一化坐标系 (Normalized Coordinates, $\mathcal{NDC}$)**:
     *   定义：MediaPipe 输出的无量纲坐标，范围 $[0, 1]$。
-    *   变换：$u_{pixel} = u_{norm} \times W_{img}, \quad v_{pixel} = v_{norm} \times H_{img}$。
+    *   变换： $u_{pixel} = u_{norm} \times W_{img}, \quad v_{pixel} = v_{norm} \times H_{img}$ 。
 
 *   **相机坐标系 (Camera Space, $\mathcal{C}$)**:
     *   定义：遵循右手坐标系定则，以摄像头光心 (Optical Center) 为原点。
@@ -27,7 +27,7 @@
 
 ## 2. 头部空间位姿解算 (Head Pose & Position Estimation)
 
-头部追踪的核心挑战在于从单目二维图像中恢复三维空间信息，这是一个典型的**不适定问题 (Ill-posed Problem)**，需引入几何先验知识进行约束求解。
+头部追踪的核心挑战在于从单目二维图像中恢复三维空间信息，这是一个典型的**不适定问题**，需引入几何知识进行求解。
 
 ### 2.1 单目深度估计 (Monocular Depth Estimation)
 
@@ -40,37 +40,37 @@
     *   应用 `OneEuroFilter` 对 2D 特征点进行初步平滑去抖。
 3.  **计算焦距**：
 设定虚拟焦距 $f$（基于视场角 FOV 计算）：
-$$
-f = \frac{W / 2}{\tan(FOV / 2)}
-$$
+
+$$f = \frac{W / 2}{\tan(FOV / 2)}$$
 
 根据相似三角形关系：
-$$
-Z = \frac{D_{real} \times f}{d_{pixel}}
-$$
+
+$$Z = \frac{D_{real} \times f}{d_{pixel}}$$
 
 *   $D_{real}$: 物理空间中的真实特征距离（如内外眼角间距，配置项 `P_OUTER_EYE_DIST_MM` 和 `P_INNER_EYE_DIST_MM`）。
 *   $d_{pixel}$: 图像空间中的观测像素距离。
 
     分别计算基于内眼角和外眼角的距离，依内外眼角关键点置信度取加权平均值：
-    $$
-    Z = \frac{w_{133} \times D_{133} + w_{362} \times D_{362} + w_{33} \times D_{33} + w_{263} \times D_{263}}{w_{133} + w_{362} + w_{33} + w_{263}}
-    $$
+
+    $$Z = \frac{w_{133} \times D_{133} + w_{362} \times D_{362} + w_{33} \times D_{33} + w_{263} \times D_{263}}{w_{133} + w_{362} + w_{33} + w_{263}}$$
+
     其中 $w_{i}$ 是第 $i$ 个关键点的置信度，$D_{i}$ 是基于 $i$ 点的距离估算。
 
 #### 2.1.3 姿态补偿 (Pose Compensation)
 **问题分析**：当头部发生旋转（特别是 Yaw 轴偏航）时，特征点连线在成像平面上的投影会因透视缩短效应 (Foreshortening) 而变短，导致直接计算的 $d_{pixel}$ 偏小，进而使估算的深度 $Z$ 虚大。
 
 **修正方案**：
-$$ Z_{corrected} = Z \times \cos(\theta_{yaw}) $$
+
+$$Z_{corrected} = Z \times \cos(\theta_{yaw})$$
+
 此处 $\theta_{yaw}$ 由 PnP 算法解算得到的头部姿态提供。此步骤有效消除了用户头部转动带来的误差。
 
 #### 2.1.4 信号滤波 (Signal Filtering)
 **问题分析**：由于光照变化和分传感器限制导致的图像噪声，直接计算的 $Z$ 值存在高频抖动。若直接用于后续 $X, Y$ 计算，会进一步叠加抖动，导致计算结果不可用。
 
 **解决方案**：采用级联滤波策略。
-1.  **OneEuroFilter (一欧元滤波)**：对输入的 2D 特征点进行初步降噪。该滤波器具备自适应截止频率，能在低速运动时去抖（高阻尼），高速运动时保持响应（低阻尼），有效平衡**延迟 (Latency)** 与 **抖动 (Jitter)**。
-2.  **OneDKalmanFilter (一维卡尔曼滤波)**：专门针对深度值 $Z$ 进行强化时域平滑。卡尔曼滤波通过“预测-更新”机制，能最优地估计系统状态，显著提升深度数据的平滑度与稳定性。*推测用户左右移动易于前后移动，故在此以增大深度信息延迟为代价尽量消除抖动，以保证平面位置的稳定。*
+1.  **OneEuroFilter (一欧元滤波)**：对输入的 2D 特征点进行初步降噪。该滤波器具备自适应截止频率，能在低速运动时去抖（高阻尼），高速运动时保持响应（低阻尼），有效平衡**延迟 ** 与 **抖动**。
+2.  **OneDKalmanFilter (一维卡尔曼滤波)**：专门针对深度值 $Z$ 进行强化时域平滑,显著提升深度数据的平滑度与稳定性。*推测用户左右移动易于前后移动，故在此以增大深度信息延迟为代价尽量消除抖动，以保证平面位置的稳定。*
 
 ### 2.2 头部姿态解算 (Head Pose Estimation)
 
@@ -78,18 +78,20 @@ $$ Z_{corrected} = Z \times \cos(\theta_{yaw}) $$
 
 #### 2.2.1 算法路径
 1.  **3D-2D 对应关系构建**：选取人脸 6 个刚性特征点（鼻尖、下巴、眼角、嘴角），建立其在通用 3D 人脸模型系下的坐标 $P_{model}$ 与当前图像观测坐标 $P_{image}$ 的映射。
-2.  **非线性优化求解**：使用 `cv2.solvePnP` 求解相机外参（旋转向量 $\vec{r}$ 和平移向量 $\vec{t}$），使得重投影误差 (Reprojection Error) 最小化：
-    $$
-    \min_{\mathbf{R}, \mathbf{t}} \sum_{i} \| P_{image}^{(i)} - \pi(\mathbf{R} P_{model}^{(i)} + \mathbf{t}) \|^2
-    $$
+2.  **非线性优化求解**：使用 `cv2.solvePnP` 求解相机外参（旋转向量 $\vec{r}$ 和平移向量 $\vec{t}$），使得重投影误差最小化：
+
+    $$\min_{\mathbf{R}, \mathbf{t}} \sum_{i} \| P_{image}^{(i)} - \pi(\mathbf{R} P_{model}^{(i)} + \mathbf{t}) \|^2$$
+
     其中 $\pi$ 为投影函数。
-3.  **欧拉角转换**：利用罗德里格斯公式 (Rodrigues' Rotation Formula) 将旋转向量转换为旋转矩阵，再分解为欧拉角。
+3.  **欧拉角转换**：利用罗德里格斯公式将旋转向量转换为旋转矩阵，再分解为欧拉角。
 4.  **滤波**对计算出的角度应用 `OneEuroFilter` 进行平滑处理。
 
 ### 2.3 平面位置反投影 (Back-Projection)
 
 获得稳定的深度 $Z_{corrected}$ 后，利用针孔模型逆变换，将图像平面坐标 $(u, v)$ 反推回相机空间坐标 $(X, Y)$：
-$$ X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times \frac{v - c_y}{f_y} $$
+
+$$X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times \frac{v - c_y}{f_y}$$
+
 ### 至此，我们完成了从 2D 图像到 3D 空间 $(X, Y, Z)$ 的完整重构。
 
 ---
@@ -101,14 +103,17 @@ $$ X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times 
 ### 3.1 算法流程
 1.  **眼球中心定位**：
     利用 PnP 解算出的头部旋转 $\mathbf{R}$ 和平移 $\mathbf{T}$，将标准人脸模型中的眼球中心变换至当前相机坐标系：
-    $$ P_{eye\_cam} = \mathbf{R} \cdot P_{eye\_model} + \mathbf{T} $$
+
+    $$P_{eye\_cam} = \mathbf{R} \cdot P_{eye\_model} + \mathbf{T}$$
+
 2.  **虹膜射线投射 (Ray Casting)**：
     从相机光心出发，穿过图像平面上的虹膜中心点 $P_{iris\_uv}$ 发射一条射线。
 3.  **几何求交 (Geometric Intersection)**：
     将眼球建模为半径 $r \approx 12mm$ 的球体。计算射线与球面的交点 $P_{iris\_3d}$。
 4.  **视线向量生成**：
     连接眼球中心与虹膜表面交点，得到视线方向向量：
-    $$ \vec{V}_{gaze} = \frac{P_{iris\_3d} - P_{eye\_cam}}{\| P_{iris\_3d} - P_{eye\_cam} \|} $$
+
+    $$\vec{V}_{gaze} = \frac{P_{iris\_3d} - P_{eye\_cam}}{\| P_{iris\_3d} - P_{eye\_cam} \|}$$
 
 ---
 
@@ -133,15 +138,18 @@ $$ X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times 
 
 2.  **观测法向量 ($N_{obs}$)**：
     利用 MediaPipe 在屏幕空间提取的关键点（手腕 $P_0$，食指根 $P_5$，小指根 $P_{17}$），通过向量叉积粗略估计手掌在相平面上的法向量：
-    $$ \vec{N}_{obs} = \overrightarrow{P_0 P_5} \times \overrightarrow{P_0 P_{17}} $$
+
+    $$\vec{N}_{obs} = \overrightarrow{P_0 P_5} \times \overrightarrow{P_0 P_{17}}$$
+
     此向量虽然不精确，但其 $Z$ 分量的符号（朝向）是鲁棒的。
 
 3.  **预测法向量 ($N_{pred}$)**：
     对 IPPE 返回的每一个候选旋转矩阵 $\mathbf{R}_i$，将模型空间的标准法向量 $\vec{N}_{model}$ 变换至相机空间：
-    $$ \vec{N}_{pred}^{(i)} = \mathbf{R}_i \cdot \vec{N}_{model} $$
+    
+    $$\vec{N}_{pred}^{(i)} = \mathbf{R}_i \cdot \vec{N}_{model}$$
 
 4.  **歧义优选 (Disambiguation)**：
-    计算点积 $\vec{N}_{obs} \cdot \vec{N}_{pred}^{(i)}$。选择点积最大（即方向最一致）的解作为最终结果。此方法有效地解决了平面物体的姿态翻转问题，保证了手部追踪的连续性。
+    计算点积 $\vec{N}_{obs} \cdot \vec{N}_{pred}^{(i)}$ 。选择点积最大（即方向最一致）的解作为最终结果。此方法有效地解决了平面物体的姿态翻转问题，保证了手部追踪的连续性。
 
 ---
 
@@ -161,8 +169,10 @@ $$ X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times 
 
 ### 2.1 边界计算
 设用户眼睛在屏幕空间的相对坐标为 $(x, y, z)$，近裁剪面距离为 $n$。根据相似三角形：
-$$ l = (-\frac{W}{2} - x) \cdot \frac{n}{z}, \quad r = (\frac{W}{2} - x) \cdot \frac{n}{z} $$
-$$ b = (-\frac{H}{2} - y) \cdot \frac{n}{z}, \quad t = (\frac{H}{2} - y) \cdot \frac{n}{z} $$
+
+$$l = (-\frac{W}{2} - x) \cdot \frac{n}{z}, \quad r = (\frac{W}{2} - x) \cdot \frac{n}{z}$$
+
+$$b = (-\frac{H}{2} - y) \cdot \frac{n}{z}, \quad t = (\frac{H}{2} - y) \cdot \frac{n}{z}$$
 
 ### 2.2 矩阵构建
 标准的透视投影矩阵通常不仅包含缩放，还包含切变项 $P_{0,2}$ 和 $P_{1,2}$，用于实现视锥体的偏斜：
@@ -183,8 +193,8 @@ $$
 ## 3. 仿生眼动控制 (Biometric Eye Movement)
 
 **骨骼初始偏移校准**：
-    为了兼容任意模型的骨骼绑定方式（有些模型的眼球骨骼朝向可能不是标准的 Z 轴向前，这可能导致人物出现对眼、白眼等情况，或是因轴向模糊导致眼球贴图自旋等*诡异*情况），脚本在启动时计算当前旋转与标准“正视前方”旋转之间的差异矩阵 $Q_{offset}$：
-    $$ Q_{offset} = Q_{ref}^{-1} \times Q_{current} $$
+    为了兼容任意模型的骨骼绑定方式（有些模型的眼球骨骼朝向可能不是标准的 Z 轴向前，这可能导致人物出现对眼、白眼等情况，或是因轴向模糊导致眼球贴图自旋等*诡异*情况），脚本在启动时计算当前旋转与标准“正视前方”旋转之间的差异矩阵 $Q_{offset}$：  
+    $$Q_{offset} = Q_{ref}^{-1} \times Q_{current}$$  
     以此对角色眼球进行轴向锁定，在后续更新时，总是先计算标准旋转，再叠加此偏移。这排除了镜像骨骼等问题，保证了人物眼球的正确转动。
 
 为了赋予虚拟角色生命力，脚本 `Sight.cs` 模拟了人类眼球运动的微观特征。
@@ -193,10 +203,11 @@ $$
     计算眼球旋转 $Q_{look\_at}$ 以抵消头部运动，保持注视点锁定。
 
 *   **微扫视 (Microsaccades)**：
-    引入高频低幅的随机噪声 $Q_{jitter}$，模拟眼部肌肉的生理性震颤，避免“死鱼眼”现象。
+    引入高频低幅的随机噪声 $Q_{jitter}$，模拟眼部肌肉的生理性震颤，避免死鱼眼现象。
 
 *   **扫视 (Saccades)**：
     模拟注意力的无意识转移，随机地将视线快速移开再复位的瞥视行为，大大增加了人物的真实感。
 
 最终眼球旋转四元数：
-$$ Q_{final} = Q_{look\_at} \cdot Q_{saccade} \cdot Q_{jitter} \cdot Q_{calibration\_offset} $$
+
+$$Q_{final} = Q_{look\_at} \cdot Q_{saccade} \cdot Q_{jitter} \cdot Q_{calibration\_offset}$$
