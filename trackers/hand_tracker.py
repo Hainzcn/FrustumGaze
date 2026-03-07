@@ -9,7 +9,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
 from modules.shared_mem import get_shared_array
-from utils.math_utils import OneEuroFilter, Simple3DKalmanFilter
+from utils.math_utils import OneEuroFilter, Simple3DKalmanFilter, AdaptiveEKF
 from utils.image_utils import GlobalImagePreprocessor
 from config import settings
 
@@ -410,85 +410,95 @@ class HandProcessorProcess(multiprocessing.Process):
         score = np.clip((ratio - 1.2) / (1.6 - 1.2), 0.0, 1.0)
         return score, ratio
 
-    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, label="Unknown", score=0.0):
+    def _estimate_normal_svd(self, landmarks, frame_width, frame_height):
+        """
+        通道 B: SVD 平面拟合估算法向量
+        """
+        # Indices: Wrist, IndexMCP, MiddleMCP, RingMCP, PinkyMCP
+        indices = [0, 5, 9, 13, 17]
+        points = []
+        for i in indices:
+            if i < len(landmarks):
+                lm = landmarks[i]
+                # Convert to consistent 3D space (Image Pixel Space)
+                # Z is relative to wrist, scale is approx same as X
+                # We use width for Z scale to match X
+                points.append([lm.x * frame_width, lm.y * frame_height, lm.z * frame_width])
+        
+        if len(points) < 3:
+            return np.array([0.0, 0.0, -1.0])
+
+        points = np.array(points)
+        # Center the points
+        centroid = np.mean(points, axis=0)
+        centered = points - centroid
+        
+        # SVD
+        try:
+            u, s, vh = np.linalg.svd(centered)
+            # Normal is the last row of vh (corresponding to smallest singular value)
+            normal = vh[-1]
+            
+            # Normalize
+            norm_val = np.linalg.norm(normal)
+            if norm_val > 1e-6:
+                normal /= norm_val
+            else:
+                return np.array([0.0, 0.0, -1.0])
+                
+            return normal
+        except Exception:
+            return np.array([0.0, 0.0, -1.0])
+
+    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, normal_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, label="Unknown", score=0.0):
         """
         计算手部空间位置 (Camera Space) 并评估置信度 q
+        多源融合法向量估计 (PnP + SVD + Prediction)
         """
         # --- 1. Landmark Confidence Check ---
-        # 使用 Handedness Score 作为置信度指标 (因为 MediaPipe Hand Landmarks 通常不包含 visibility)
-        # 放宽阈值，以便于调试：< 0.4 不可信， > 0.8 高度可信
         conf_handedness = np.clip((score - 0.4) / (0.8 - 0.4), 0.0, 1.0)
-        
-        # --- 1.1 Hand Openness Check ---
-        # 增加手掌张开程度检测，过滤握拳
         conf_openness, openness_ratio = self._calculate_hand_openness(landmarks, aspect_ratio)
-        
-        # 综合 L 分数：Handedness * Openness
         conf_lm_score = conf_handedness * conf_openness
 
         # --- 2. Geometric Consistency Check ---
-        # 传递 True 以获取原始 shape factor 用于调试
         conf_geo_score, shape_factor = self._calculate_geometric_consistency(landmarks, label, aspect_ratio)
 
-        # 如果前置检查太差，可能直接跳过 PnP ? 
-        # 但为了获得完整的 q，还是继续算，只是最终 q 会很低。
-        
         # 3D Model Points (Meters)
-        # 根据配置的手掌宽度进行缩放
-
-        # 默认宽度 6.0cm
         scale = settings.HAND_PALM_WIDTH_CM / 6.0
         
-        # 为了避免 3 点共线导致 SOLVEPNP_IPPE 失败，对中间手指的 X 坐标进行微调
-        # 模拟指关节的自然弧度
+        # 0: Wrist, 5: Index, 9: Middle, 13: Ring, 17: Pinky
+        # Model defined in local frame with Z=0 (Flat Palm)
+        # Normal of model points is (0, 0, -1) [Right-handed rule with current point order?]
+        # Let's verify model normal direction later or ensure consistency.
         model_points = np.array([
             (0.08 * scale, 0.03 * scale, 0.0),     # 0: Wrist
             (0.0, -0.03 * scale, 0.0),             # 5: Index MCP
-            (-0.01 * scale, -0.01 * scale, 0.0),   # 9: Middle MCP (稍向前突出)
-            (-0.005 * scale,  0.01 * scale, 0.0),  # 13: Ring MCP (稍向前突出)
+            (-0.01 * scale, -0.01 * scale, 0.0),   # 9: Middle MCP
+            (-0.005 * scale,  0.01 * scale, 0.0),  # 13: Ring MCP
             (0.0,  0.03 * scale, 0.0)              # 17: Pinky MCP
         ], dtype="double")
         
-        # --- 应用 OneEuroFilter 滤波 (对关键点) ---
-        p0_x, p0_y = landmarks[0].x, landmarks[0].y
-        p5_x, p5_y = landmarks[5].x, landmarks[5].y
-        p9_x, p9_y = landmarks[9].x, landmarks[9].y
-        p13_x, p13_y = landmarks[13].x, landmarks[13].y
-        p17_x, p17_y = landmarks[17].x, landmarks[17].y
-        
-        if one_euro_filter_dict is not None and timestamp is not None:
-            def get_filtered_val(name, val):
-                if name not in one_euro_filter_dict:
-                    one_euro_filter_dict[name] = OneEuroFilter(
-                        min_cutoff=settings.HAND_POS_ONE_EURO_MIN_CUTOFF, 
-                        beta=settings.HAND_POS_ONE_EURO_BETA,
-                        d_cutoff=settings.HAND_POS_ONE_EURO_D_CUTOFF
-                    )
-                return one_euro_filter_dict[name].filter(val, timestamp)
-            
-            p0_x = get_filtered_val('p0_x', p0_x)
-            p0_y = get_filtered_val('p0_y', p0_y)
-            p5_x = get_filtered_val('p5_x', p5_x)
-            p5_y = get_filtered_val('p5_y', p5_y)
-            p9_x = get_filtered_val('p9_x', p9_x)
-            p9_y = get_filtered_val('p9_y', p9_y)
-            p13_x = get_filtered_val('p13_x', p13_x)
-            p13_y = get_filtered_val('p13_y', p13_y)
-            p17_x = get_filtered_val('p17_x', p17_x)
-            p17_y = get_filtered_val('p17_y', p17_y)
+        # OneEuroFilter for landmarks
+        p_coords = []
+        indices = [0, 5, 9, 13, 17]
+        for idx in indices:
+            px, py = landmarks[idx].x, landmarks[idx].y
+            if one_euro_filter_dict is not None and timestamp is not None:
+                def get_filtered_val(name, val):
+                    if name not in one_euro_filter_dict:
+                        one_euro_filter_dict[name] = OneEuroFilter(
+                            min_cutoff=settings.HAND_POS_ONE_EURO_MIN_CUTOFF, 
+                            beta=settings.HAND_POS_ONE_EURO_BETA,
+                            d_cutoff=settings.HAND_POS_ONE_EURO_D_CUTOFF
+                        )
+                    return one_euro_filter_dict[name].filter(val, timestamp)
+                px = get_filtered_val(f'p{idx}_x', px)
+                py = get_filtered_val(f'p{idx}_y', py)
+            p_coords.append((px * frame_width, py * frame_height))
 
-        # 2D Image Points
-        image_points = np.array([
-            (p0_x * frame_width, p0_y * frame_height),   # 0
-            (p5_x * frame_width, p5_y * frame_height),   # 5
-            (p9_x * frame_width, p9_y * frame_height),   # 9
-            (p13_x * frame_width, p13_y * frame_height), # 13
-            (p17_x * frame_width, p17_y * frame_height)  # 17
-        ], dtype="double")
+        image_points = np.array(p_coords, dtype="double")
         
-        # Camera Matrix
         if camera_matrix is None:
-            # fx = fy = (w / 2) / tan(fov / 2)
             focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
             center = (frame_width / 2.0, frame_height / 2.0)
             camera_matrix = np.array(
@@ -496,159 +506,203 @@ class HandProcessorProcess(multiprocessing.Process):
                  [0, focal_length, center[1]],
                  [0, 0, 1]], dtype="double"
             )
-        dist_coeffs = np.zeros((4, 1)) # Assuming no distortion
-        
-        # 使用 IPPE 方法解决 PnP (需要 4 个共面点)
-        # 选取 0, 5, 13, 17 作为 4 个关键点
+        dist_coeffs = np.zeros((4, 1))
+
+        # --- Channel A: PnP Solver ---
+        # Try IPPE first (4 points: 0, 5, 13, 17)
         model_points_4 = model_points[[0, 1, 3, 4]]
         image_points_4 = image_points[[0, 1, 3, 4]]
         
-        rvecs, tvecs = [], []
         success = False
+        rvecs, tvecs = [], []
         
         try:
-            # SOLVEPNP_IPPE 适用于 4 个共面点，返回所有可能的解 (通常是 2 个)
-            # 在部分 OpenCV 版本中可能返回 4 个值 (n, rvecs, tvecs, err)
             pnp_result = cv2.solvePnPGeneric(
                 model_points_4, image_points_4, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE
             )
-            
-            if len(pnp_result) == 3:
-                n_solutions, rvecs, tvecs = pnp_result
-            elif len(pnp_result) == 4:
-                n_solutions, rvecs, tvecs, _ = pnp_result
-            else:
-                success = False
-                n_solutions = 0
-
-            success = n_solutions > 0
+            if len(pnp_result) >= 3:
+                rvecs, tvecs = pnp_result[1], pnp_result[2]
+                success = len(rvecs) > 0
         except Exception:
             success = False
 
-        # Fallback: 如果 IPPE 失败，尝试 ITERATIVE (使用所有 5 个点)
         if not success:
             try:
                 success_iter, rvec_iter, tvec_iter = cv2.solvePnP(
                     model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
                 )
                 if success_iter:
-                    rvecs = [rvec_iter]
-                    tvecs = [tvec_iter]
+                    rvecs, tvecs = [rvec_iter], [tvec_iter]
                     success = True
             except Exception:
                 success = False
 
-        if not success:
-            return None, None, None, None, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) # Empty scores + raw values
+        best_rvec, best_tvec = None, None
+        
+        # Calculate Model Normal (used for disambiguation and PnP normal extraction)
+        v1_model = model_points[1] - model_points[0]
+        v2_model = model_points[4] - model_points[0]
+        normal_model = np.cross(v1_model, v2_model) # Roughly (0, 0, -1)
+        if np.linalg.norm(normal_model) > 1e-6:
+            normal_model /= np.linalg.norm(normal_model)
 
-        # --- 解的筛选 (Disambiguation) ---
-        # 计算观测到的手掌法向量 (Camera Space)
-        # 使用 landmarks 的 (x, y, z) 构建向量 P5-P0 和 P17-P0
-        # 注意: landmarks.z 是相对于 wrist 的深度，比例尺大致与 x 相同
-        # 需要考虑 aspect ratio 将 y 转换到与 x, z 相同的比例空间
-        
-        def get_vec(lm_to, lm_from):
-            return np.array([
-                lm_to.x - lm_from.x,
-                (lm_to.y - lm_from.y) * (frame_height / frame_width), # Normalize y scale to x
-                lm_to.z - lm_from.z
-            ])
+        if success:
+            # Disambiguation using observed normal from raw landmarks
+            # Calculate observed normal in Camera Space
+            def get_vec(lm_to, lm_from):
+                return np.array([
+                    lm_to.x - lm_from.x,
+                    (lm_to.y - lm_from.y) * (frame_height / frame_width), 
+                    lm_to.z - lm_from.z
+                ])
+            v1_obs = get_vec(landmarks[5], landmarks[0])
+            v2_obs = get_vec(landmarks[17], landmarks[0])
+            normal_obs = np.cross(v1_obs, v2_obs)
+            if np.linalg.norm(normal_obs) > 1e-6:
+                normal_obs /= np.linalg.norm(normal_obs)
 
-        v1_obs = get_vec(landmarks[5], landmarks[0])  # P0 -> P5
-        v2_obs = get_vec(landmarks[17], landmarks[0]) # P0 -> P17
-        normal_obs = np.cross(v1_obs, v2_obs)
-        norm_obs_val = np.linalg.norm(normal_obs)
-        if norm_obs_val > 1e-6:
-            normal_obs /= norm_obs_val
-        
-        # 计算模型法向量 (Model Space)
-        v1_model = model_points[1] - model_points[0] # P0 -> P5
-        v2_model = model_points[4] - model_points[0] # P0 -> P17
-        normal_model = np.cross(v1_model, v2_model)
-        norm_model_val = np.linalg.norm(normal_model)
-        if norm_model_val > 1e-6:
-            normal_model /= norm_model_val
-            
-        best_rvec = None
-        best_tvec = None
-        max_dot = -100.0
-        
-        for i in range(len(rvecs)):
-            rvec = rvecs[i]
-            tvec = tvecs[i]
-            
-            # 将模型法向量变换到相机空间: N_cam = R * N_model
-            R, _ = cv2.Rodrigues(rvec)
-            normal_cam = np.dot(R, normal_model)
-            
-            # 计算与观测法向量的点积
-            dot_prod = np.dot(normal_cam, normal_obs)
-            
-            if dot_prod > max_dot:
-                max_dot = dot_prod
-                best_rvec = rvec
-                best_tvec = tvec
-        
-        if best_rvec is None:
-            return None, None, None, None, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            
-        rotation_vector = best_rvec
-        translation_vector = best_tvec
-        
+            max_dot = -100.0
+            for i in range(len(rvecs)):
+                rvec = rvecs[i]
+                tvec = tvecs[i]
+                R, _ = cv2.Rodrigues(rvec)
+                normal_cam = np.dot(R, normal_model)
+                dot_prod = np.dot(normal_cam, normal_obs)
+                if dot_prod > max_dot:
+                    max_dot = dot_prod
+                    best_rvec = rvec
+                    best_tvec = tvec
+
         # --- 3. Reprojection Error Check ---
-        reproj_rmse = self._calculate_reprojection_error(image_points, model_points, best_rvec, best_tvec, camera_matrix, dist_coeffs)
-        
-        # 正常帧一般在 2-5 像素，超过 10 像素基本可以判定解算失败
-        # 放宽阈值：< 10px -> 1.0, > 30px -> 0.0
+        if best_rvec is not None:
+            reproj_rmse = self._calculate_reprojection_error(image_points, model_points, best_rvec, best_tvec, camera_matrix, dist_coeffs)
+        else:
+            reproj_rmse = 100.0
+
         if reproj_rmse < 10.0:
             conf_rep_score = 1.0
         elif reproj_rmse > 30.0:
             conf_rep_score = 0.0
         else:
             conf_rep_score = 1.0 - (reproj_rmse - 10.0) / (30.0 - 10.0)
-            
-        # --- Combine Scores ---
-        # q = conf_lm_score * 0.3 + conf_geo_score * 0.3 + conf_rep_score * 0.4
-        # 使用加权乘积以增强“一票否决”的效果
+
+        # --- Final Q Calculation ---
         q = conf_lm_score * conf_geo_score * conf_rep_score
 
-        x = translation_vector[0][0]
-        y = translation_vector[1][0]
-        z = translation_vector[2][0]
-
-        # 计算 Yaw 角 (围绕 Y 轴旋转)
-        # rotation_vector 是旋转向量，需要转换为旋转矩阵
-        R, _ = cv2.Rodrigues(rotation_vector)
-        # Yaw 计算通常依赖于旋转矩阵的具体定义。假设标准相机坐标系:
+        # --- Multi-Source Normal Fusion ---
         
-        # 简化计算 (假设主要关注水平旋转)
-        # Yaw = atan2(R[0,2], R[2,2]) (视定义而定)
-        # 这里使用通用的 Euler Angles 计算
+        # 1. Channel A: PnP Normal
+        n_A = np.array([0.0, 0.0, 0.0])
+        if best_rvec is not None:
+            R, _ = cv2.Rodrigues(best_rvec)
+            n_A = np.dot(R, normal_model)
         
-        yaw = math.atan2(-R[2,0], math.sqrt(R[2,1]**2 + R[2,2]**2))
+        # 2. Channel B: SVD Plane Normal
+        n_B = self._estimate_normal_svd(landmarks, frame_width, frame_height)
+        # Ensure n_B aligns with n_A (or generally towards camera if n_A missing)
+        # If n_A is valid, align n_B to n_A
+        if np.linalg.norm(n_A) > 0.1:
+            if np.dot(n_A, n_B) < 0:
+                n_B = -n_B
+        else:
+            # Fallback: Assume palm faces camera (Z < 0 in OpenCV frame)
+            # But wait, normal_model is approx (0,0,-1).
+            # If hand is facing camera, normal should be approx (0,0,-1).
+            if n_B[2] > 0: # If pointing away from camera
+                n_B = -n_B
+                
+        # 3. Channel C: Prediction
+        n_C = np.array([0.0, 0.0, -1.0]) # Default fallback
+        if normal_filter:
+            if not normal_filter.first_run:
+                # Use prediction from previous step (AdaptiveEKF)
+                pred_theta, pred_phi = normal_filter.predict()
+                nz_p = math.cos(pred_theta)
+                nx_p = math.sin(pred_theta) * math.cos(pred_phi)
+                ny_p = math.sin(pred_theta) * math.sin(pred_phi)
+                n_C = np.array([nx_p, ny_p, nz_p])
+        
+        # Weights
+        # wA = q * alphaA
+        # wB = betaB
+        # wC = (1-q) * alphaC
+        alpha_A = 1.0
+        beta_B = 0.5
+        alpha_C = 0.8
+        
+        wA = q * alpha_A
+        wB = beta_B
+        wC = (1.0 - q) * alpha_C
+        
+        # Fusion
+        n_final_raw = wA * n_A + wB * n_B + wC * n_C
+        norm_final = np.linalg.norm(n_final_raw)
+        
+        if norm_final > 1e-6:
+            n_final = n_final_raw / norm_final
+        else:
+            n_final = n_C # Fallback
+            
+        # Update Filter with the Fused Result (Feedback Loop)
+        if normal_filter:
+            # Convert n_final (Observation) to Spherical (theta, phi)
+            nx, ny, nz = n_final[0], n_final[1], n_final[2]
+            
+            # Theta: [0, pi], from Z axis
+            theta_obs = math.acos(np.clip(nz, -1.0, 1.0))
+            phi_obs = math.atan2(ny, nx)
+            
+            # Update AdaptiveEKF (Correct Step)
+            # R is dynamically adjusted by q
+            
+            # Check for NaN/Inf in observations
+            if math.isnan(theta_obs) or math.isnan(phi_obs):
+                # Skip update if observation is invalid
+                pass
+            else:
+                theta_f, phi_f = normal_filter.correct(theta_obs, phi_obs, q)
+                
+                # Check for NaN in output
+                if not (math.isnan(theta_f) or math.isnan(phi_f)):
+                    # Use Filtered Result as Final Output
+                    nz_f = math.cos(theta_f)
+                    nx_f = math.sin(theta_f) * math.cos(phi_f)
+                    ny_f = math.sin(theta_f) * math.sin(phi_f)
+                    n_final = np.array([nx_f, ny_f, nz_f])
+        
+        # --- Calculate Output Variables ---
+        
+        # Position (from PnP or keep previous?)
+        if best_tvec is not None:
+            x = best_tvec[0][0]
+            y = best_tvec[1][0]
+            z = best_tvec[2][0]
+        else:
+            # If PnP failed, we don't have a new position.
+            # Return 0 or previous? 
+            # Existing logic returned 0.0.
+            x, y, z = 0.0, 0.0, 0.0
+            
+        # Yaw from n_final
+        # n_final is in Camera Space.
+        # Yaw is rotation around Y axis.
+        # Project n_final to XZ plane.
+        # Normal (0, 0, -1) -> Yaw 0.
+        # Normal (-1, 0, 0) -> Yaw +90 (Points Left)
+        # Normal (1, 0, 0) -> Yaw -90 (Points Right)
+        # yaw = atan2(-nx, -nz)
+        yaw = math.atan2(-n_final[0], -n_final[2])
         yaw_deg = math.degrees(yaw)
         
-        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
-        if one_euro_filter_dict is not None and timestamp is not None:
-            if 'yaw' not in one_euro_filter_dict:
-                one_euro_filter_dict['yaw'] = OneEuroFilter(
-                    min_cutoff=settings.HAND_YAW_ONE_EURO_MIN_CUTOFF, 
-                    beta=settings.HAND_YAW_ONE_EURO_BETA,
-                    d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
-                )
-            yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
-        
-        # 为了兼容旧逻辑，计算 w_norm 作为某种置信度或调试信息
+        # Width (w_norm)
         dx = landmarks[5].x - landmarks[17].x
         dy = (landmarks[5].y - landmarks[17].y) * (1.0 / aspect_ratio)
         w_norm = math.sqrt(dx*dx + dy*dy)
         
-        # --- 应用 SimpleKalmanFilter 滤波 (对 X, Y, Z) ---
-        if pos_filter:
+        # Pos Filter
+        if pos_filter and best_tvec is not None:
             x, y, z = pos_filter.update(x, y, z)
-        
-        # Return scores AND raw values for debugging
-        # (lm_score, geo_score, rep_score, raw_lm_score, raw_geo_factor, raw_rmse, openness_ratio)
+            
         scores_tuple = (conf_lm_score, conf_geo_score, conf_rep_score, score, shape_factor, reproj_rmse, openness_ratio)
         
         return x, y, z, w_norm, yaw_deg, q, scores_tuple
@@ -701,7 +755,8 @@ class HandProcessorProcess(multiprocessing.Process):
                 'pos': Simple3DKalmanFilter(
                     process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
                     measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
-                )
+                ),
+                'normal': AdaptiveEKF(process_noise=1e-5, measurement_noise_base=1e-3)
             },
             'Right': {
                 'w_norm': OneEuroFilter(
@@ -712,7 +767,8 @@ class HandProcessorProcess(multiprocessing.Process):
                 'pos': Simple3DKalmanFilter(
                     process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
                     measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
-                )
+                ),
+                'normal': AdaptiveEKF(process_noise=1e-5, measurement_noise_base=1e-3)
             }
         }
 
@@ -752,7 +808,7 @@ class HandProcessorProcess(multiprocessing.Process):
                     )
                     cached_dims = (target_w, target_h)
                 
-                # processed_rgb = GlobalImagePreprocessor.to_rgb(frame) # 移除：延迟转换
+                # --- 手部检测 ---
                 
                 timestamp_ms = int(time.time() * 1000)
 
@@ -896,6 +952,7 @@ class HandProcessorProcess(multiprocessing.Process):
                         # 获取滤波器
                         w_norm_filter = None
                         pos_filter = None
+                        normal_filter = None
                         one_euro_filter_dict = None
                         label = "Unknown"
                         score = 0.0 # Default score
@@ -909,6 +966,7 @@ class HandProcessorProcess(multiprocessing.Process):
                                 if label in self.hand_filters:
                                     w_norm_filter = self.hand_filters[label]['w_norm']
                                     pos_filter = self.hand_filters[label]['pos']
+                                    normal_filter = self.hand_filters[label]['normal']
                                     # 检查是否有 OneEuroFilter 字典用于关键点滤波
                                     if 'landmarks' not in self.hand_filters[label]:
                                         self.hand_filters[label]['landmarks'] = {}
@@ -918,6 +976,7 @@ class HandProcessorProcess(multiprocessing.Process):
                             landmarks, target_w, target_h, aspect_ratio, 
                             w_norm_filter=w_norm_filter, 
                             pos_filter=pos_filter, 
+                            normal_filter=normal_filter,
                             one_euro_filter_dict=one_euro_filter_dict,
                             timestamp=timestamp_ms / 1000.0,
                             camera_matrix=cached_camera_matrix,
@@ -968,7 +1027,9 @@ class HandProcessorProcess(multiprocessing.Process):
             except queue.Empty:
                 continue
             except Exception as e:
+                import traceback
                 print(f"Processing Error in Hand Process: {e}")
+                traceback.print_exc()
 
         # 清理
         detector.close()

@@ -333,8 +333,9 @@ class FrustumGazePipeline:
                 hy = self.latest_closest_hand.get('y', 0.0)
                 hz = self.latest_closest_hand.get('z', 0.0)
                 q = self.latest_closest_hand.get('q', 0.0)
+                yaw = self.latest_closest_hand.get('yaw', 0.0)
                 
-                hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f},{q:.3f}"
+                hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f},{q:.3f},{yaw:.1f}"
                 self.udp_sender.send(hand_str)
         except queue.Empty:
             pass
