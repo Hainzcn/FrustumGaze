@@ -251,10 +251,23 @@ class Visualizer:
                 # 优化: 使用常量字体参数
                 cv2.putText(frame, text, (wx, wy + 20), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
                 
-                # 显示 Yaw 角
+                # 显示 Yaw 角和 Q 值
                 yaw_val = hand_pos.get('yaw', 0.0)
-                yaw_text = f"Yaw: {yaw_val:.1f} deg"
-                cv2.putText(frame, yaw_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
+                q_val = hand_pos.get('q', 0.0)
+                scores = hand_pos.get('scores', (0,0,0, 0,0,0, 0))
+                # scores: (lm, geo, rep, raw_lm, raw_geo, raw_rep, openness_ratio)
+                if len(scores) >= 7:
+                    line1 = f"Q:{q_val:.2f} Yaw:{yaw_val:.0f}"
+                    line2 = f"L:{scores[0]:.1f}({scores[3]:.2f}, Op:{scores[6]:.1f}) G:{scores[1]:.1f}({scores[4]:.2f})"
+                    line3 = f"R:{scores[2]:.1f}({scores[5]:.1f})"
+                    
+                    cv2.putText(frame, line1, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
+                    cv2.putText(frame, line2, (wx, wy + 60), self.FONT, self.FONT_SCALE_TEXT, text_color, 1)
+                    cv2.putText(frame, line3, (wx, wy + 80), self.FONT, self.FONT_SCALE_TEXT, text_color, 1)
+                else:
+                    # Fallback for old format
+                    yaw_text = f"Yaw:{yaw_val:.0f} Q:{q_val:.2f}"
+                    cv2.putText(frame, yaw_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
                 
                 # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
                 if is_pinching:

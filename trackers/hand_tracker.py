@@ -15,10 +15,12 @@ from config import settings
 
 # 定义简单的 Landmark 类以便于 Pickle
 class LandmarkLite:
-    def __init__(self, x, y, z):
+    def __init__(self, x, y, z, visibility=0.0, presence=0.0):
         self.x = x
         self.y = y
         self.z = z
+        self.visibility = visibility
+        self.presence = presence
 
 # 定义简单的 Result 类以便于 Pickle
 class HandDetectionResultLite:
@@ -30,7 +32,12 @@ class HandDetectionResultLite:
             for landmarks in hand_landmarks_list:
                 simple_landmarks = []
                 for lm in landmarks:
-                    simple_landmarks.append(LandmarkLite(lm.x, lm.y, lm.z))
+                    # Check if lm has visibility/presence (MediaPipe landmarks do)
+                    vis = getattr(lm, 'visibility', 0.0)
+                    if vis is None: vis = 0.0
+                    pres = getattr(lm, 'presence', 0.0)
+                    if pres is None: pres = 0.0
+                    simple_landmarks.append(LandmarkLite(lm.x, lm.y, lm.z, vis, pres))
                 self.multi_hand_landmarks.append(simple_landmarks)
         if handedness_list:
             # MediaPipe's handedness is a list of lists of categories
@@ -59,6 +66,10 @@ class HandProcessorProcess(multiprocessing.Process):
         self.roi = None
         self.roi_miss_count = 0
         self.MAX_ROI_MISS_COUNT = 30 # 连续多少帧没检测到手重置 ROI
+        
+        # 几何一致性历史记录 {label: [area1, area2, ...]}
+        self.hand_area_history = {}
+        self.MAX_HISTORY_LEN = 30
 
     def _calculate_roi(self, landmarks_list, padding_factor=0.5):
         """
@@ -251,23 +262,180 @@ class HandProcessorProcess(multiprocessing.Process):
             
         return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None):
+    def _calculate_landmark_confidence(self, landmarks):
         """
-        计算手部空间位置 (Camera Space)
-        使用 PnP 解算
-        关键点索引: 0 (Wrist), 5 (Index MCP), 9 (Middle MCP), 13 (Ring MCP), 17 (Pinky MCP)
-        模型设定 (以 5-17 连线中点为原点, 使得 PnP 结果直接反映手掌中心位置):
-        - 距离: 0-5=10cm, 5-17=6cm, 0-17=8cm (默认)
-        - 直角三角形, 直角在 17
-        - P5:  (0.0, -0.03, 0.0)
-        - P9:  (0.0, -0.01, 0.0)
-        - P13: (0.0,  0.01, 0.0)
-        - P17: (0.0,  0.03, 0.0)
-        - P0:  (0.08, 0.03, 0.0)
+        计算关键点置信度均值 (MediaPipe visibility)
+        取手掌区域关键点 (0, 5, 9, 13, 17)
         """
+        indices = [0, 5, 9, 13, 17]
+        total_vis = 0.0
+        count = 0
+        for i in indices:
+            if i < len(landmarks):
+                # LandmarkLite or MediaPipe Landmark
+                # getattr might return None if attribute exists but is None
+                vis = getattr(landmarks[i], 'visibility', 0.0)
+                if vis is None:
+                    vis = 0.0
+                total_vis += vis
+                count += 1
+        
+        if count == 0:
+            return 0.0
+        return total_vis / count
+
+    def _calculate_polygon_area(self, points):
+        """Shoelace formula for polygon area"""
+        area = 0.0
+        n = len(points)
+        for i in range(n):
+            j = (i + 1) % n
+            area += points[i][0] * points[j][1]
+            area -= points[j][0] * points[i][1]
+        return abs(area) / 2.0
+
+    def _calculate_geometric_consistency(self, landmarks, label, aspect_ratio):
+        """
+        几何一致性校验 (改进版)
+        计算当前帧手掌形状因子 (Area / (Width^2)) 与前 N 帧均值的偏差比
+        消除距离缩放带来的影响
+        返回: score, shape_factor
+        """
+        indices = [0, 5, 9, 13, 17]
+        points = []
+        for i in indices:
+            if i < len(landmarks):
+                # Apply aspect ratio to y to make shape calculation uniform
+                points.append((landmarks[i].x, landmarks[i].y / aspect_ratio))
+        
+        if len(points) < 5:
+            return 1.0, 0.0 # Not enough points
+            
+        current_area = self._calculate_polygon_area(points)
+        
+        # Calculate characteristic length (Wrist to Middle MCP)
+        p0 = points[0]
+        p9 = points[2] # Index 2 in points corresponds to landmark 9
+        dx = p0[0] - p9[0]
+        dy = p0[1] - p9[1]
+        length_sq = dx*dx + dy*dy
+        
+        if length_sq < 1e-9:
+            return 0.0, 0.0 # Degenerate hand
+            
+        shape_factor = current_area / length_sq
+        
+        # 如果没有 label 或者 label 为 Unknown，暂不记录历史或者只使用临时历史
+        if not label or label == "Unknown":
+            return 1.0, shape_factor
+            
+        if label not in self.hand_area_history:
+            self.hand_area_history[label] = []
+            
+        history = self.hand_area_history[label]
+        
+        if not history:
+            history.append(shape_factor)
+            return 1.0, shape_factor
+            
+        mean_factor = sum(history) / len(history)
+        
+        # Update history
+        history.append(shape_factor)
+        if len(history) > self.MAX_HISTORY_LEN:
+            history.pop(0)
+            
+        if mean_factor < 1e-9:
+            return 0.0, shape_factor
+            
+        deviation = abs(shape_factor - mean_factor) / mean_factor
+        
+        # 偏差超过 30% 判定为几何畸变
+        # 映射到 [0, 1] 分数
+        score = max(0.0, 1.0 - (deviation / 0.3))
+        return score, shape_factor
+
+    def _calculate_reprojection_error(self, image_points, object_points, rvec, tvec, camera_matrix, dist_coeffs):
+        """
+        计算重投影误差 RMSE (像素)
+        """
+        try:
+            projected_points, _ = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs)
+            # image_points shape: (N, 2), projected_points shape: (N, 1, 2)
+            projected_points = projected_points.reshape(-1, 2)
+            
+            error = cv2.norm(image_points, projected_points, cv2.NORM_L2)
+            rmse = error / math.sqrt(len(image_points))
+            return rmse
+        except Exception:
+            return 100.0 # High error on failure
+
+    def _calculate_hand_openness(self, landmarks, aspect_ratio):
+        """
+        计算手掌张开程度 (Openness)
+        通过比较 (Wrist->MiddleTip) 和 (Wrist->MiddleMCP) 的距离
+        用于过滤握拳等非展开手势
+        """
+        # 0: Wrist, 9: Middle MCP, 12: Middle Tip
+        if len(landmarks) <= 12:
+            return 0.0, 0.0
+            
+        p0 = landmarks[0]
+        p9 = landmarks[9]
+        p12 = landmarks[12]
+        
+        # Calculate 3D distances (assuming z is same scale as x)
+        # Apply aspect ratio to y for correct Euclidean distance in 3D volume approximation
+        
+        def dist3d(p_a, p_b):
+            dx = p_a.x - p_b.x
+            dy = (p_a.y - p_b.y) / aspect_ratio
+            dz = p_a.z - p_b.z
+            return math.sqrt(dx*dx + dy*dy + dz*dz)
+
+        d_wrist_mcp = dist3d(p0, p9)
+        d_wrist_tip = dist3d(p0, p12)
+        
+        if d_wrist_mcp < 1e-6:
+            return 0.0, 0.0
+            
+        ratio = d_wrist_tip / d_wrist_mcp
+        
+        # Thresholds:
+        # Open hand: Ratio ~ 2.0 or higher (fingers extended)
+        # Fist: Ratio ~ 1.0 or lower (fingers curled)
+        # Relaxed: ~ 1.5
+        
+        # Map 1.2 -> 0.0, 1.6 -> 1.0 (Strictly penalize fists)
+        score = np.clip((ratio - 1.2) / (1.6 - 1.2), 0.0, 1.0)
+        return score, ratio
+
+    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, label="Unknown", score=0.0):
+        """
+        计算手部空间位置 (Camera Space) 并评估置信度 q
+        """
+        # --- 1. Landmark Confidence Check ---
+        # 使用 Handedness Score 作为置信度指标 (因为 MediaPipe Hand Landmarks 通常不包含 visibility)
+        # 放宽阈值，以便于调试：< 0.4 不可信， > 0.8 高度可信
+        conf_handedness = np.clip((score - 0.4) / (0.8 - 0.4), 0.0, 1.0)
+        
+        # --- 1.1 Hand Openness Check ---
+        # 增加手掌张开程度检测，过滤握拳
+        conf_openness, openness_ratio = self._calculate_hand_openness(landmarks, aspect_ratio)
+        
+        # 综合 L 分数：Handedness * Openness
+        conf_lm_score = conf_handedness * conf_openness
+
+        # --- 2. Geometric Consistency Check ---
+        # 传递 True 以获取原始 shape factor 用于调试
+        conf_geo_score, shape_factor = self._calculate_geometric_consistency(landmarks, label, aspect_ratio)
+
+        # 如果前置检查太差，可能直接跳过 PnP ? 
+        # 但为了获得完整的 q，还是继续算，只是最终 q 会很低。
         
         # 3D Model Points (Meters)
         # 根据配置的手掌宽度进行缩放
+
         # 默认宽度 6.0cm
         scale = settings.HAND_PALM_WIDTH_CM / 6.0
         
@@ -371,7 +539,7 @@ class HandProcessorProcess(multiprocessing.Process):
                 success = False
 
         if not success:
-            return None, None, None, None, 0.0
+            return None, None, None, None, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) # Empty scores + raw values
 
         # --- 解的筛选 (Disambiguation) ---
         # 计算观测到的手掌法向量 (Camera Space)
@@ -422,10 +590,27 @@ class HandProcessorProcess(multiprocessing.Process):
                 best_tvec = tvec
         
         if best_rvec is None:
-            return None, None, None, None, 0.0
+            return None, None, None, None, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             
         rotation_vector = best_rvec
         translation_vector = best_tvec
+        
+        # --- 3. Reprojection Error Check ---
+        reproj_rmse = self._calculate_reprojection_error(image_points, model_points, best_rvec, best_tvec, camera_matrix, dist_coeffs)
+        
+        # 正常帧一般在 2-5 像素，超过 10 像素基本可以判定解算失败
+        # 放宽阈值：< 10px -> 1.0, > 30px -> 0.0
+        if reproj_rmse < 10.0:
+            conf_rep_score = 1.0
+        elif reproj_rmse > 30.0:
+            conf_rep_score = 0.0
+        else:
+            conf_rep_score = 1.0 - (reproj_rmse - 10.0) / (30.0 - 10.0)
+            
+        # --- Combine Scores ---
+        # q = conf_lm_score * 0.3 + conf_geo_score * 0.3 + conf_rep_score * 0.4
+        # 使用加权乘积以增强“一票否决”的效果
+        q = conf_lm_score * conf_geo_score * conf_rep_score
 
         x = translation_vector[0][0]
         y = translation_vector[1][0]
@@ -462,7 +647,12 @@ class HandProcessorProcess(multiprocessing.Process):
         if pos_filter:
             x, y, z = pos_filter.update(x, y, z)
         
-        return x, y, z, w_norm, yaw_deg
+        # Return scores AND raw values for debugging
+        # (lm_score, geo_score, rep_score, raw_lm_score, raw_geo_factor, raw_rmse, openness_ratio)
+        scores_tuple = (conf_lm_score, conf_geo_score, conf_rep_score, score, shape_factor, reproj_rmse, openness_ratio)
+        
+        return x, y, z, w_norm, yaw_deg, q, scores_tuple
+
 
     def run(self):
         # --- 在子进程中初始化资源 ---
@@ -655,7 +845,11 @@ class HandProcessorProcess(multiprocessing.Process):
                                 norm_x = final_x / target_w
                                 norm_y = final_y / target_h
                                 
-                                mapped_landmarks.append(LandmarkLite(norm_x, norm_y, lm.z))
+                                vis = getattr(lm, 'visibility', 0.0)
+                                if vis is None: vis = 0.0
+                                pres = getattr(lm, 'presence', 0.0)
+                                if pres is None: pres = 0.0
+                                mapped_landmarks.append(LandmarkLite(norm_x, norm_y, lm.z, vis, pres))
                             mapped_landmarks_list.append(mapped_landmarks)
                         
                         # 更新 ROI
@@ -704,12 +898,14 @@ class HandProcessorProcess(multiprocessing.Process):
                         pos_filter = None
                         one_euro_filter_dict = None
                         label = "Unknown"
+                        score = 0.0 # Default score
                         
                         if result_lite.multi_handedness and idx < len(result_lite.multi_handedness):
                             # handedness[0] is the category with highest score
                             categories = result_lite.multi_handedness[idx]
                             if categories:
                                 label = categories[0]['label'] # "Left" or "Right"
+                                score = categories[0]['score'] # Get score
                                 if label in self.hand_filters:
                                     w_norm_filter = self.hand_filters[label]['w_norm']
                                     pos_filter = self.hand_filters[label]['pos']
@@ -718,13 +914,15 @@ class HandProcessorProcess(multiprocessing.Process):
                                         self.hand_filters[label]['landmarks'] = {}
                                     one_euro_filter_dict = self.hand_filters[label]['landmarks']
                         
-                        x, y, z, w_norm, yaw = self._calculate_hand_pos(
+                        x, y, z, w_norm, yaw, q, scores = self._calculate_hand_pos(
                             landmarks, target_w, target_h, aspect_ratio, 
                             w_norm_filter=w_norm_filter, 
                             pos_filter=pos_filter, 
                             one_euro_filter_dict=one_euro_filter_dict,
                             timestamp=timestamp_ms / 1000.0,
-                            camera_matrix=cached_camera_matrix
+                            camera_matrix=cached_camera_matrix,
+                            label=label,
+                            score=score
                         )
                         
                         if x is not None:
@@ -739,6 +937,8 @@ class HandProcessorProcess(multiprocessing.Process):
                                 'z': z,
                                 'yaw': yaw,
                                 'w_norm': w_norm,
+                                'q': q,
+                                'scores': scores, # (lm, geo, rep)
                                 'landmarks': landmarks,
                                 'is_pinching': is_pinching,
                                 'pinch_pos': (px, py, pz),
