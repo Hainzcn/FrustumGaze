@@ -93,7 +93,8 @@ graph TD
     *   **独立 ROI**: 类似于人脸，手部也有独立的 ROI 追踪逻辑。
     *   **平滑滤波**:
         *   **OneEuroFilter**: 处理高频抖动（Jitter）。
-        *   **KalmanFilter**: 处理运动预测和平滑。
+        *   **Simple3DKalmanFilter**: 处理 3D 位置的平滑。
+        *   **AdaptiveEKF**: 专用于手掌法向量的自适应滤波，支持动态噪声调整和球坐标系追踪。
     *   **手势识别**: 简单的捏合（Pinch）检测。
 
 #### 2.3.3 姿态追踪 (`trackers/pose_tracker.py`)
@@ -148,6 +149,13 @@ graph TD
     *   **原理**: 针对标量值的一维卡尔曼滤波。
     *   **应用场景**: 人脸距离估算 (`dist`)、人脸中心偏移量 (`offset_x`, `offset_y`)。
 
+4.  **AdaptiveEKF (自适应扩展卡尔曼滤波器)**
+    *   **原理**: 基于球坐标系 $(\theta, \phi)$ 的扩展卡尔曼滤波，观测噪声 $R$ 根据置信度 $q$ 动态缩放。
+    *   **应用场景**: 手掌法向量 (Normal Vector) 追踪。
+    *   **核心机制**: 
+        *   $R \propto 1/q^2$: 低置信度时依赖预测。
+        *   奇异性处理: 在极点附近抑制方位角噪声。
+
 ### 5.2 滤波流程
 
 #### 5.2.1 人脸追踪 (Face Tracking)
@@ -168,18 +176,27 @@ graph LR
 #### 5.2.2 手部追踪 (Hand Tracking)
 
 ```mermaid
-graph LR
-    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点 (0,5,9...)]
-    SmoothLandmarks -->|几何计算| Yaw[Yaw 角度]
-    Yaw -->|OneEuroFilter| SmoothYaw[平滑 Yaw]
-    SmoothLandmarks -->|几何计算| Pos3D[3D 坐标 (X,Y,Z)]
+graph TD
+    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点]
+    
+    SmoothLandmarks -->|PnP| ChannelA[通道A: PnP法向量]
+    SmoothLandmarks -->|SVD| ChannelB[通道B: SVD法向量]
+    AdaptiveEKF -->|Predict| ChannelC[通道C: 运动预测]
+    
+    ChannelA & ChannelB & ChannelC -->|加权融合| FusedNormal[融合法向量]
+    
+    FusedNormal -->|Correct| AdaptiveEKF[自适应EKF]
+    
+    SmoothLandmarks -->|几何计算| Pos3D[3D 坐标]
     Pos3D -->|Simple3DKalmanFilter| SmoothPos3D[平滑 3D 坐标]
 ```
 
 *   **关键点级**: 对指尖和手掌中心等关键点进行 `OneEuroFilter`。
-*   **结果级**:
-    *   计算出的 **Yaw 角度** 再次通过 `OneEuroFilter`。
-    *   计算出的 **3D 坐标** 通过 `Simple3DKalmanFilter` 进行平滑。
+*   **法向量融合**:
+    *   **通道 A/B/C**: 分别计算 PnP、SVD 和预测法向量。
+    *   **加权融合**: 根据置信度 $q$ 合成最终法向量。
+    *   **反馈回路**: 融合结果作为观测值输入 `AdaptiveEKF`，更新滤波器状态以供下一帧预测。
+*   **位置平滑**: 3D 坐标通过 `Simple3DKalmanFilter` 进行平滑。
 
 ### 5.3 参数调优
 
