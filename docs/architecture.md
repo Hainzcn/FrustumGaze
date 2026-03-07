@@ -127,3 +127,63 @@ graph TD
 3.  **跳帧策略**: 允许配置追踪频率（如每 2 帧追踪一次），中间帧使用插值或卡尔曼滤波预测。
 4.  **Zero-Copy 共享内存**: 消除进程间图像传输的开销。
 5.  **MJPEG 视频流**: 摄像头采集使用 MJPEG 格式，减少 USB 带宽占用，提高帧率。
+
+## 5. 滤波策略详解 (Filtering Strategy)
+
+为了解决由于光照变化、传感器噪声以及计算机视觉模型本身的抖动带来的数据不稳定性，系统实施了多级滤波策略。
+
+### 5.1 滤波器类型
+
+1.  **OneEuroFilter (一欧元滤波器)**
+    *   **原理**: 一种自适应的一阶低通滤波器。在低速运动时降低截止频率以减少抖动（高平滑），在高速运动时提高截止频率以减少延迟（高响应）。
+    *   **应用场景**: 2D 关键点坐标、旋转角度（Yaw）、手部归一化距离。
+    *   **核心参数**: `min_cutoff` (最小截止频率), `beta` (速度系数), `d_cutoff` (导数截止频率)。
+
+2.  **Simple3DKalmanFilter (简单 3D 卡尔曼滤波器)**
+    *   **原理**: 标准线性卡尔曼滤波，用于平滑 3D 空间坐标 (X, Y, Z)。假设匀速运动模型。
+    *   **应用场景**: 手部最终输出的 3D 世界坐标。
+    *   **核心参数**: `process_noise` (过程噪声 Q), `measurement_noise` (测量噪声 R)。
+
+3.  **OneDKalmanFilter (一维卡尔曼滤波器)**
+    *   **原理**: 针对标量值的一维卡尔曼滤波。
+    *   **应用场景**: 人脸距离估算 (`dist`)、人脸中心偏移量 (`offset_x`, `offset_y`)。
+
+### 5.2 滤波流程
+
+#### 5.2.1 人脸追踪 (Face Tracking)
+
+```mermaid
+graph LR
+    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点]
+    SmoothLandmarks -->|PnP Solver| Pose[头部姿态 (R, T)]
+    Pose -->|计算| Dist[距离估算]
+    Dist -->|OneDKalmanFilter| SmoothDist[平滑距离]
+    Pose -->|计算| Offset[中心偏移]
+    Offset -->|OneDKalmanFilter| SmoothOffset[平滑偏移]
+```
+
+*   **关键点级**: 对参与 PnP 解算的 6 个关键点 (眼角、鼻尖、嘴角等) 先进行 `OneEuroFilter` 滤波，减少输入噪声。
+*   **数据级**: 解算出的距离和偏移量再次经过 `OneDKalmanFilter`，确保数值输出的稳定性，避免 UI 忽大忽小。
+
+#### 5.2.2 手部追踪 (Hand Tracking)
+
+```mermaid
+graph LR
+    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点 (0,5,9...)]
+    SmoothLandmarks -->|几何计算| Yaw[Yaw 角度]
+    Yaw -->|OneEuroFilter| SmoothYaw[平滑 Yaw]
+    SmoothLandmarks -->|几何计算| Pos3D[3D 坐标 (X,Y,Z)]
+    Pos3D -->|Simple3DKalmanFilter| SmoothPos3D[平滑 3D 坐标]
+```
+
+*   **关键点级**: 对指尖和手掌中心等关键点进行 `OneEuroFilter`。
+*   **结果级**:
+    *   计算出的 **Yaw 角度** 再次通过 `OneEuroFilter`。
+    *   计算出的 **3D 坐标** 通过 `Simple3DKalmanFilter` 进行平滑。
+
+### 5.3 参数调优
+
+所有滤波参数均在 `config/settings.py` 中集中管理，可根据实际体验进行微调：
+
+*   **减少抖动**: 降低 `min_cutoff`，增加 `beta` (OneEuro); 减小 `process_noise`，增大 `measurement_noise` (Kalman)。
+*   **降低延迟**: 增大 `min_cutoff` (OneEuro); 增大 `process_noise` (Kalman)。
