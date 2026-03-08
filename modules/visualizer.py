@@ -251,10 +251,11 @@ class Visualizer:
                 # 优化: 使用常量字体参数
                 cv2.putText(frame, text, (wx, wy + 20), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
                 
-                # 显示 Yaw 角
+                # 显示 Yaw 和 Pitch 角
                 yaw_val = hand_pos.get('yaw', 0.0)
-                yaw_text = f"Yaw: {yaw_val:.1f} deg"
-                cv2.putText(frame, yaw_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
+                pitch_val = hand_pos.get('pitch', 0.0)
+                angle_text = f"Yaw:{yaw_val:.0f} Pitch:{pitch_val:.0f}"
+                cv2.putText(frame, angle_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
                 
                 # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
                 if is_pinching:

@@ -251,199 +251,187 @@ class HandProcessorProcess(multiprocessing.Process):
             
         return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None):
+    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, hand_label=None):
         """
-        计算手部空间位置 (Camera Space)
-        使用 PnP 解算
-        关键点索引: 0 (Wrist), 5 (Index MCP), 9 (Middle MCP), 13 (Ring MCP), 17 (Pinky MCP)
-        模型设定 (以 5-17 连线中点为原点, 使得 PnP 结果直接反映手掌中心位置):
-        - 距离: 0-5=10cm, 5-17=6cm, 0-17=8cm (默认)
-        - 直角三角形, 直角在 17
-        - P5:  (0.0, -0.03, 0.0)
-        - P9:  (0.0, -0.01, 0.0)
-        - P13: (0.0,  0.01, 0.0)
-        - P17: (0.0,  0.03, 0.0)
-        - P0:  (0.08, 0.03, 0.0)
+        计算手部空间位置 (Camera Space) 和 Yaw 角
+        完全弃用 PnP，改用几何特征计算
         """
         
-        # 3D Model Points (Meters)
-        # 根据配置的手掌宽度进行缩放
-        # 默认宽度 6.0cm
-        scale = settings.HAND_PALM_WIDTH_CM / 6.0
+        # 1. 几何法计算 Yaw (Rotation around Y-axis)
+        # 使用 Wrist(0), Index MCP(5), Middle MCP(9), Pinky MCP(17)
+        # 构建统一坐标系 (以 Width 为基准单位)
         
-        # 为了避免 3 点共线导致 SOLVEPNP_IPPE 失败，对中间手指的 X 坐标进行微调
-        # 模拟指关节的自然弧度
-        model_points = np.array([
-            (0.08 * scale, 0.03 * scale, 0.0),     # 0: Wrist
-            (0.0, -0.03 * scale, 0.0),             # 5: Index MCP
-            (-0.01 * scale, -0.01 * scale, 0.0),   # 9: Middle MCP (稍向前突出)
-            (-0.005 * scale,  0.01 * scale, 0.0),  # 13: Ring MCP (稍向前突出)
-            (0.0,  0.03 * scale, 0.0)              # 17: Pinky MCP
-        ], dtype="double")
+        def get_pt_unified(lm):
+            # 将 y 轴缩放以匹配 x 轴的比例 (假设 square pixels)
+            # lm.x 是 0..1 (relative to width)
+            # lm.y 是 0..1 (relative to height)
+            # unified_y = lm.y * (height / width) = lm.y * (1.0 / aspect_ratio)
+            # lm.z 已经是 relative to width (MediaPipe spec)
+            return np.array([lm.x, lm.y * (1.0 / aspect_ratio), lm.z])
+
+        p0 = get_pt_unified(landmarks[0])   # Wrist
+        p5 = get_pt_unified(landmarks[5])   # Index MCP
+        p9 = get_pt_unified(landmarks[9])   # Middle MCP
+        p17 = get_pt_unified(landmarks[17]) # Pinky MCP
         
-        # --- 应用 OneEuroFilter 滤波 (对关键点) ---
-        p0_x, p0_y = landmarks[0].x, landmarks[0].y
-        p5_x, p5_y = landmarks[5].x, landmarks[5].y
-        p9_x, p9_y = landmarks[9].x, landmarks[9].y
-        p13_x, p13_y = landmarks[13].x, landmarks[13].y
-        p17_x, p17_y = landmarks[17].x, landmarks[17].y
+        # 向量 1: 手腕 -> 中指根部 (大致指向手指方向 / Up direction)
+        v_up = p9 - p0
         
-        if one_euro_filter_dict is not None and timestamp is not None:
-            def get_filtered_val(name, val):
-                if name not in one_euro_filter_dict:
-                    one_euro_filter_dict[name] = OneEuroFilter(
-                        min_cutoff=settings.HAND_POS_ONE_EURO_MIN_CUTOFF, 
-                        beta=settings.HAND_POS_ONE_EURO_BETA,
-                        d_cutoff=settings.HAND_POS_ONE_EURO_D_CUTOFF
-                    )
-                return one_euro_filter_dict[name].filter(val, timestamp)
+        # 向量 2: 食指根部 -> 小指根部 (手掌横向 / Across direction)
+        v_across = p17 - p5
+        
+        # 计算法向量 (Normal)
+        # 根据用户反馈，当手心朝向摄像头时，观测到的 Cross Product 结果是指向 -Z (Out of screen)
+        # 导致 Yaw ~ 180 度 (-170)。
+        # 用户期望：手心朝向摄像头时 Yaw = 0 (Normal 指向 +Z, Into screen)
+        # 因此我们需要反转 Cross Product 的结果
+        
+        # Cross Product
+        normal = np.cross(v_up, v_across)
+        
+        # 左右手坐标系处理
+        # 1. 基础修正: 将法向量反转，使其从指向相机变为背离相机 (Into Screen)
+        #    这样 Right Hand Palm to Camera 会产生 0 度 (Instead of 180)
+        #    Right Hand Face Right 会产生 +90 (Instead of -90)
+        #    Right Hand Face Left 会产生 -90 (Instead of +90)
+        normal = -normal
+        
+        # 2. 左右手对称性修正
+        #    Left Hand Palm to Camera:
+        #    Thumb(Right/LargeX), Pinky(Left/SmallX) -> v_across (+X)
+        #    v_up (-Y)
+        #    raw_normal = (-Y) x (+X) = +Z (0 deg)
+        #    inverted_normal = -Z (180 deg)
+        #    所以左手需要再次反转，或者保持原始 raw_normal (即不进行第一步反转)
+        #    为了代码清晰，我们显式处理：
+        
+        if hand_label == "Left":
+             # 左手不需要上述的全局反转 (因为它本身就是 +Z)
+             # 或者说，我们需要再一次反转回来
+             normal = -normal
+             
+        # 总结逻辑简化:
+        # Right Hand: normal = -cross(v_up, v_across)
+        # Left Hand:  normal =  cross(v_up, v_across)
             
-            p0_x = get_filtered_val('p0_x', p0_x)
-            p0_y = get_filtered_val('p0_y', p0_y)
-            p5_x = get_filtered_val('p5_x', p5_x)
-            p5_y = get_filtered_val('p5_y', p5_y)
-            p9_x = get_filtered_val('p9_x', p9_x)
-            p9_y = get_filtered_val('p9_y', p9_y)
-            p13_x = get_filtered_val('p13_x', p13_x)
-            p13_y = get_filtered_val('p13_y', p13_y)
-            p17_x = get_filtered_val('p17_x', p17_x)
-            p17_y = get_filtered_val('p17_y', p17_y)
-
-        # 2D Image Points
-        image_points = np.array([
-            (p0_x * frame_width, p0_y * frame_height),   # 0
-            (p5_x * frame_width, p5_y * frame_height),   # 5
-            (p9_x * frame_width, p9_y * frame_height),   # 9
-            (p13_x * frame_width, p13_y * frame_height), # 13
-            (p17_x * frame_width, p17_y * frame_height)  # 17
-        ], dtype="double")
-        
-        # Camera Matrix
-        if camera_matrix is None:
-            # fx = fy = (w / 2) / tan(fov / 2)
-            focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
-            center = (frame_width / 2.0, frame_height / 2.0)
-            camera_matrix = np.array(
-                [[focal_length, 0, center[0]],
-                 [0, focal_length, center[1]],
-                 [0, 0, 1]], dtype="double"
-            )
-        dist_coeffs = np.zeros((4, 1)) # Assuming no distortion
-        
-        # 使用 IPPE 方法解决 PnP (需要 4 个共面点)
-        # 选取 0, 5, 13, 17 作为 4 个关键点
-        model_points_4 = model_points[[0, 1, 3, 4]]
-        image_points_4 = image_points[[0, 1, 3, 4]]
-        
-        rvecs, tvecs = [], []
-        success = False
-        
-        try:
-            # SOLVEPNP_IPPE 适用于 4 个共面点，返回所有可能的解 (通常是 2 个)
-            # 在部分 OpenCV 版本中可能返回 4 个值 (n, rvecs, tvecs, err)
-            pnp_result = cv2.solvePnPGeneric(
-                model_points_4, image_points_4, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE
-            )
+        # 归一化
+        norm_val = np.linalg.norm(normal)
+        if norm_val > 1e-6:
+            normal /= norm_val
+        else:
+            normal = np.array([0.0, 0.0, 1.0])
             
-            if len(pnp_result) == 3:
-                n_solutions, rvecs, tvecs = pnp_result
-            elif len(pnp_result) == 4:
-                n_solutions, rvecs, tvecs, _ = pnp_result
-            else:
-                success = False
-                n_solutions = 0
-
-            success = n_solutions > 0
-        except Exception:
-            success = False
-
-        # Fallback: 如果 IPPE 失败，尝试 ITERATIVE (使用所有 5 个点)
-        if not success:
-            try:
-                success_iter, rvec_iter, tvec_iter = cv2.solvePnP(
-                    model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-                )
-                if success_iter:
-                    rvecs = [rvec_iter]
-                    tvecs = [tvec_iter]
-                    success = True
-            except Exception:
-                success = False
-
-        if not success:
-            return None, None, None, None, 0.0
-
-        # --- 解的筛选 (Disambiguation) ---
-        # 计算观测到的手掌法向量 (Camera Space)
-        # 使用 landmarks 的 (x, y, z) 构建向量 P5-P0 和 P17-P0
-        # 注意: landmarks.z 是相对于 wrist 的深度，比例尺大致与 x 相同
-        # 需要考虑 aspect ratio 将 y 转换到与 x, z 相同的比例空间
-        
-        def get_vec(lm_to, lm_from):
-            return np.array([
-                lm_to.x - lm_from.x,
-                (lm_to.y - lm_from.y) * (frame_height / frame_width), # Normalize y scale to x
-                lm_to.z - lm_from.z
-            ])
-
-        v1_obs = get_vec(landmarks[5], landmarks[0])  # P0 -> P5
-        v2_obs = get_vec(landmarks[17], landmarks[0]) # P0 -> P17
-        normal_obs = np.cross(v1_obs, v2_obs)
-        norm_obs_val = np.linalg.norm(normal_obs)
-        if norm_obs_val > 1e-6:
-            normal_obs /= norm_obs_val
-        
-        # 计算模型法向量 (Model Space)
-        v1_model = model_points[1] - model_points[0] # P0 -> P5
-        v2_model = model_points[4] - model_points[0] # P0 -> P17
-        normal_model = np.cross(v1_model, v2_model)
-        norm_model_val = np.linalg.norm(normal_model)
-        if norm_model_val > 1e-6:
-            normal_model /= norm_model_val
-            
-        best_rvec = None
-        best_tvec = None
-        max_dot = -100.0
-        
-        for i in range(len(rvecs)):
-            rvec = rvecs[i]
-            tvec = tvecs[i]
-            
-            # 将模型法向量变换到相机空间: N_cam = R * N_model
-            R, _ = cv2.Rodrigues(rvec)
-            normal_cam = np.dot(R, normal_model)
-            
-            # 计算与观测法向量的点积
-            dot_prod = np.dot(normal_cam, normal_obs)
-            
-            if dot_prod > max_dot:
-                max_dot = dot_prod
-                best_rvec = rvec
-                best_tvec = tvec
-        
-        if best_rvec is None:
-            return None, None, None, None, 0.0
-            
-        rotation_vector = best_rvec
-        translation_vector = best_tvec
-
-        x = translation_vector[0][0]
-        y = translation_vector[1][0]
-        z = translation_vector[2][0]
-
-        # 计算 Yaw 角 (围绕 Y 轴旋转)
-        # rotation_vector 是旋转向量，需要转换为旋转矩阵
-        R, _ = cv2.Rodrigues(rotation_vector)
-        # Yaw 计算通常依赖于旋转矩阵的具体定义。假设标准相机坐标系:
-        
-        # 简化计算 (假设主要关注水平旋转)
-        # Yaw = atan2(R[0,2], R[2,2]) (视定义而定)
-        # 这里使用通用的 Euler Angles 计算
-        
-        yaw = math.atan2(-R[2,0], math.sqrt(R[2,1]**2 + R[2,2]**2))
+        # 计算 Yaw
+        # Project onto X-Z plane.
+        # normal = (nx, ny, nz)
+        # Yaw = atan2(nx, nz)
+        # Check: Right Hand Facing Camera -> N=(0,0,1) -> atan2(0, 1) = 0 deg.
+        # Rotated Right (Thumb to Camera, Palm Left) -> N=(-1,0,0) -> atan2(-1, 0) = -90.
+        # Rotated Left (Pinky to Camera, Palm Right) -> N=(1,0,0) -> atan2(1, 0) = 90.
+        yaw = math.atan2(normal[0], normal[2])
         yaw_deg = math.degrees(yaw)
         
-        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
+        # 2. 估算 3D 位置 (Camera Space)
+        # 使用几何相似三角形估算深度 Z
+        # 我们使用两种参考长度进行加权估算，并应用角度校正，以提高鲁棒性
+        
+        # 0. 准备相机参数
+        if camera_matrix is None:
+             focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
+        else:
+             focal_length = camera_matrix[0, 0]
+
+        # 参数 A: 纵向长度 (Wrist to Middle MCP)
+        # 真实长度: ~0.09m (9cm)
+        REF_LENGTH_UP_M = settings.HAND_REF_LENGTH_M
+        
+        # 参数 B: 横向宽度 (Index MCP to Pinky MCP)
+        # 真实长度: ~0.055m (5.5cm - 6.0cm)
+        # 通常成年男性手掌宽度(MCP处)约 8-9cm，但 Index(5) 到 Pinky(17) 不包含拇指侧，且是掌骨头间距
+        # 约为手掌宽度的 2/3。这里取 0.058m (5.8cm) 作为经验值
+        REF_LENGTH_ACROSS_M = 0.058 
+        
+        # 计算 Pitch (绕 X 轴旋转)
+        # Pitch = asin(-ny) (假设 normal 已经归一化)
+        # 当手掌直立正对时，normal=(0,0,1)，ny=0 -> Pitch=0
+        # 当手掌向上仰 (指尖指向相机)，normal 指向 +Y? 不，normal 始终垂直于手掌
+        # 如果手掌向后倒 (指尖远离相机)，v_up 偏向 Z。
+        pitch = math.asin(np.clip(-normal[1], -1.0, 1.0))
+        pitch_deg = math.degrees(pitch)
+        
+        # 估算 Z (基于 Up 向量 + Pitch 校正)
+        # 投影长度 L_proj_up = L_real * cos(Pitch) * (f / Z)
+        # Z = (f * L_real * cos(Pitch)) / L_proj_up
+        # 注意：这里我们使用 2D 投影长度 (忽略 z 分量)，因为我们要显式进行角度校正
+        # 如果使用包含 z 的 3D 长度，理论上不需要 cos(Pitch)，但 MediaPipe Z 可能不准
+        # 用户特别强调 "Yaw角校正"，暗示希望显式处理投影关系。
+        
+        dist_up_2d = np.linalg.norm(p9[:2] - p0[:2]) # 只取 x, y
+        
+        # 避免除零
+        if dist_up_2d < 1e-4:
+            z_up = 0.5
+        else:
+            # 限制校正角度，避免 90 度时 cos 为 0
+            cos_pitch = max(0.2, math.cos(pitch)) 
+            len_px_up = dist_up_2d * frame_width
+            # 计算 Z
+            z_up = (focal_length * REF_LENGTH_UP_M * cos_pitch) / len_px_up
+
+        # 估算 Z (基于 Across 向量 + Yaw 校正)
+        # 投影长度 W_proj = W_real * cos(Yaw) * (f / Z)
+        # Z = (f * W_real * cos(Yaw)) / W_proj
+        
+        dist_across_2d = np.linalg.norm(p17[:2] - p5[:2]) # 只取 x, y
+        
+        if dist_across_2d < 1e-4:
+            z_across = 0.5
+        else:
+            # 限制校正角度
+            cos_yaw = max(0.2, math.cos(yaw))
+            len_px_across = dist_across_2d * frame_width
+            z_across = (focal_length * REF_LENGTH_ACROSS_M * cos_yaw) / len_px_across
+            
+        # 融合策略
+        # 哪个角度小，哪个维度的投影就更可靠 (cos值大，受噪声影响小)
+        # 使用 cos 值作为权重
+        w_up = max(0.2, math.cos(pitch))
+        w_across = max(0.2, math.cos(yaw))
+        
+        # 归一化权重
+        w_sum = w_up + w_across
+        z_est = (z_up * w_up + z_across * w_across) / w_sum
+        
+        # 备选简单策略：如果 Yaw 很大 (>60度)，主要信赖 Up；如果 Pitch 很大，主要信赖 Across
+        # 上述加权已隐含此逻辑
+            
+        # 计算 X, Y (Camera Space)
+        # Center of Hand (use Middle MCP 9 or approx center)
+        # Let's use Palm Center approx: Midpoint of 0 and 9 is roughly center.
+        # Or (0 + 5 + 17)/3.
+        # Let's use (0 + 9) / 2
+        center_x_norm = (landmarks[0].x + landmarks[9].x) / 2.0
+        center_y_norm = (landmarks[0].y + landmarks[9].y) / 2.0
+        
+        # Convert to pixel coords
+        center_x_px = center_x_norm * frame_width
+        center_y_px = center_y_norm * frame_height
+        
+        cx = frame_width / 2.0
+        cy = frame_height / 2.0
+        if camera_matrix is not None:
+            cx = camera_matrix[0, 2]
+            cy = camera_matrix[1, 2]
+            
+        # X = (u - cx) * Z / fx
+        x_est = (center_x_px - cx) * z_est / focal_length
+        # Y = (v - cy) * Z / fy
+        # fy usually equals fx
+        y_est = (center_y_px - cy) * z_est / focal_length
+        
+        # 3. 滤波
+        
+        # Yaw Filter
         if one_euro_filter_dict is not None and timestamp is not None:
             if 'yaw' not in one_euro_filter_dict:
                 one_euro_filter_dict['yaw'] = OneEuroFilter(
@@ -452,17 +440,16 @@ class HandProcessorProcess(multiprocessing.Process):
                     d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
                 )
             yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
-        
-        # 为了兼容旧逻辑，计算 w_norm 作为某种置信度或调试信息
-        dx = landmarks[5].x - landmarks[17].x
-        dy = (landmarks[5].y - landmarks[17].y) * (1.0 / aspect_ratio)
-        w_norm = math.sqrt(dx*dx + dy*dy)
-        
-        # --- 应用 SimpleKalmanFilter 滤波 (对 X, Y, Z) ---
+            
+        # Pos Filter
         if pos_filter:
-            x, y, z = pos_filter.update(x, y, z)
+            x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est)
+            
+        # W_norm (for compatibility/visualizer)
+        # Just use distance between 5 and 17 in unified space
+        w_norm = np.linalg.norm(p17 - p5)
         
-        return x, y, z, w_norm, yaw_deg
+        return x_est, y_est, z_est, w_norm, yaw_deg, pitch_deg
 
     def run(self):
         # --- 在子进程中初始化资源 ---
@@ -718,13 +705,14 @@ class HandProcessorProcess(multiprocessing.Process):
                                         self.hand_filters[label]['landmarks'] = {}
                                     one_euro_filter_dict = self.hand_filters[label]['landmarks']
                         
-                        x, y, z, w_norm, yaw = self._calculate_hand_pos(
+                        x, y, z, w_norm, yaw, pitch = self._calculate_hand_pos(
                             landmarks, target_w, target_h, aspect_ratio, 
                             w_norm_filter=w_norm_filter, 
                             pos_filter=pos_filter, 
                             one_euro_filter_dict=one_euro_filter_dict,
                             timestamp=timestamp_ms / 1000.0,
-                            camera_matrix=cached_camera_matrix
+                            camera_matrix=cached_camera_matrix,
+                            hand_label=label
                         )
                         
                         if x is not None:
@@ -738,6 +726,7 @@ class HandProcessorProcess(multiprocessing.Process):
                                 'y': y,
                                 'z': z,
                                 'yaw': yaw,
+                                'pitch': pitch,
                                 'w_norm': w_norm,
                                 'landmarks': landmarks,
                                 'is_pinching': is_pinching,
