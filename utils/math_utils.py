@@ -1,55 +1,68 @@
-
 import cv2
 import numpy as np
 import math
 import time
+try:
+    from numba import jit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+# --- Numba Optimized Logic ---
+
+def _one_euro_calc_impl(x, t, x_prev, dx_prev, t_prev, min_cutoff, beta, d_cutoff):
+    if t_prev < 0.0:
+        return x, 0.0, t
+        
+    t_e = t - t_prev
+    
+    if t_e <= 0.0:
+        return x_prev, dx_prev, t_prev
+
+    r_d = 2 * math.pi * d_cutoff * t_e
+    a_d = r_d / (r_d + 1)
+    
+    dx = (x - x_prev) / t_e
+    dx_hat = a_d * dx + (1 - a_d) * dx_prev
+
+    cutoff = min_cutoff + beta * abs(dx_hat)
+    r = 2 * math.pi * cutoff * t_e
+    a = r / (r + 1)
+    
+    x_hat = a * x + (1 - a) * x_prev
+
+    return x_hat, dx_hat, t
+
+if HAS_NUMBA:
+    # 启用 cache=True 以减少启动时的编译时间
+    # 启用 nogil=True 以在纯数值计算时释放 GIL (虽然在多进程架构下收益有限，但是良好的实践)
+    one_euro_calc = jit(nopython=True, cache=True, nogil=True)(_one_euro_calc_impl)
+else:
+    one_euro_calc = _one_euro_calc_impl
 
 class OneEuroFilter:
     def __init__(self, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
-        self.min_cutoff = min_cutoff
-        self.beta = beta
-        self.d_cutoff = d_cutoff
-        self.x_prev = None
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.x_prev = 0.0
         self.dx_prev = 0.0
-        self.t_prev = None
-
-    def smoothing_factor(self, t_e, cutoff):
-        r = 2 * math.pi * cutoff * t_e
-        return r / (r + 1)
-
-    def exponential_smoothing(self, a, x, x_prev):
-        return a * x + (1 - a) * x_prev
+        self.t_prev = -1.0 # Flag for uninitialized
 
     def filter(self, x, t=None):
         if t is None:
             t = time.time()
             
-        if self.x_prev is None:
-            self.x_prev = x
-            self.dx_prev = 0.0
-            self.t_prev = t
-            return x
+        # Ensure inputs are float for numba compatibility
+        x_val = float(x)
+        t_val = float(t)
 
-        t_e = t - self.t_prev
-        
-        # Avoid division by zero
-        if t_e <= 0.0:
-            return self.x_prev
-
-        # The filtered derivative of the signal.
-        a_d = self.smoothing_factor(t_e, self.d_cutoff)
-        dx = (x - self.x_prev) / t_e
-        dx_hat = self.exponential_smoothing(a_d, dx, self.dx_prev)
-
-        # The filtered signal.
-        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
-        a = self.smoothing_factor(t_e, cutoff)
-        x_hat = self.exponential_smoothing(a, x, self.x_prev)
-
-        self.x_prev = x_hat
-        self.dx_prev = dx_hat
-        self.t_prev = t
-        return x_hat
+        self.x_prev, self.dx_prev, self.t_prev = one_euro_calc(
+            x_val, t_val, 
+            self.x_prev, self.dx_prev, self.t_prev,
+            self.min_cutoff, self.beta, self.d_cutoff
+        )
+        return self.x_prev
 
 class Simple3DKalmanFilter:
     def __init__(self, measurement_noise=0.1, process_noise=0.01):
@@ -70,9 +83,9 @@ class Simple3DKalmanFilter:
 
     def update(self, x, y, z, R_z=None):
         if R_z is not None:
-             # 只更新 Z 轴的观测噪声，并确保类型为 float32
-             self.kalman.measurementNoiseCov[2, 2] = np.float32(R_z)
-             
+            # 只更新 Z 轴的观测噪声，并确保类型为 float32
+            self.kalman.measurementNoiseCov[2, 2] = np.float32(R_z)
+            
         measurement = np.array([[np.float32(x)], [np.float32(y)], [np.float32(z)]])
         self.kalman.correct(measurement)
         prediction = self.kalman.predict()
