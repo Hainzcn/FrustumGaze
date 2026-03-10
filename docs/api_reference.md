@@ -22,7 +22,7 @@
 
 ## 2. 追踪器 (trackers)
 
-### `FaceMeshProcess` (in `trackers/face_mesh.py`)
+### `FaceMeshProcess` (in `modules/pipeline/face_process.py`)
 
 运行在独立进程中的人脸追踪器。
 
@@ -44,7 +44,7 @@
 }
 ```
 
-### `HandProcessorProcess` (in `trackers/hand_tracker.py`)
+### `HandProcessorProcess` (in `modules/pipeline/hand_process.py`)
 
 运行在独立进程中的手部追踪器。
 

@@ -14,9 +14,9 @@ from modules.shared_mem import create_shared_array
 from modules.stats import StatsManager
 from utils.image_utils import ImagePreprocessor
 from trackers.eye_tracker import EyeTracker
-from trackers.face_mesh import FrameProcessorProcess
-from trackers.hand_tracker import HandProcessorProcess
-from trackers.pose_tracker import PoseProcessorProcess
+from .face_process import FrameProcessorProcess
+from .hand_process import HandProcessorProcess
+from .pose_process import PoseProcessorProcess
 
 class FrustumGazePipeline:
     def __init__(self):
