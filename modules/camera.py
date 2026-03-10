@@ -157,10 +157,10 @@ class WebcamVideoStream:
     def set_shared_memory(self, shm_arrays):
         """延迟设置共享内存 (支持双缓冲列表)"""
         if isinstance(shm_arrays, list):
-             self.shm_arrays = shm_arrays
+            self.shm_arrays = shm_arrays
         else:
-             # 兼容单个 array 的情况 (虽然不建议)
-             self.shm_arrays = [shm_arrays]
+            # 兼容单个 array 的情况 (虽然不建议)
+            self.shm_arrays = [shm_arrays]
 
     def update(self):
         while True:

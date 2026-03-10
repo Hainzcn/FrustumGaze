@@ -57,9 +57,9 @@ class Visualizer:
         
         # 如果是全图扫描模式，仅绘制 ROI 框，不绘制后续的面部细节
         if using_full_scan:
-             # 5. 显示并处理按键 (保持显示逻辑)
-             cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
-             return cv2.waitKey(1) & 0xFF == 27 
+            # 5. 显示并处理按键 (保持显示逻辑)
+            cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
+            return cv2.waitKey(1) & 0xFF == 27 
 
         # 3. 绘制虹膜
         if eye_points and len(eye_points) == 2:
@@ -116,47 +116,47 @@ class Visualizer:
         VISIBILITY_THRESHOLD = 0.5
 
         if pose_result and pose_result.pose_landmarks:
-             pose_lms = pose_result.pose_landmarks
-             # Convert to pixels
-             for lm in pose_lms:
+            pose_lms = pose_result.pose_landmarks
+            # Convert to pixels
+            for lm in pose_lms:
                  pose_px.append((int(lm.x * w), int(lm.y * h)))
-             
-             if len(pose_px) >= 4:
-                 # Define indices for clarity based on PoseTracker output
-                 # 0: Left Shoulder, 1: Right Shoulder
-                 # 2: Left Elbow, 3: Right Elbow
-                 idx_l_sh, idx_r_sh = 0, 1
-                 idx_l_el, idx_r_el = 2, 3
-                 
-                 l_shoulder_px = pose_px[idx_l_sh]
-                 r_shoulder_px = pose_px[idx_r_sh]
-                 l_elbow_px = pose_px[idx_l_el]
-                 r_elbow_px = pose_px[idx_r_el]
-                 
-                 # Check visibility
-                 l_sh_vis = getattr(pose_lms[idx_l_sh], 'visibility', 1.0)
-                 r_sh_vis = getattr(pose_lms[idx_r_sh], 'visibility', 1.0)
-                 l_el_vis = getattr(pose_lms[idx_l_el], 'visibility', 1.0)
-                 r_el_vis = getattr(pose_lms[idx_r_el], 'visibility', 1.0)
-                 
-                 # Draw Shoulders Connection (Only if both visible)
-                 if l_sh_vis > VISIBILITY_THRESHOLD and r_sh_vis > VISIBILITY_THRESHOLD:
+            
+            if len(pose_px) >= 4:
+                # Define indices for clarity based on PoseTracker output
+                # 0: Left Shoulder, 1: Right Shoulder
+                # 2: Left Elbow, 3: Right Elbow
+                idx_l_sh, idx_r_sh = 0, 1
+                idx_l_el, idx_r_el = 2, 3
+                
+                l_shoulder_px = pose_px[idx_l_sh]
+                r_shoulder_px = pose_px[idx_r_sh]
+                l_elbow_px = pose_px[idx_l_el]
+                r_elbow_px = pose_px[idx_r_el]
+                
+                # Check visibility
+                l_sh_vis = getattr(pose_lms[idx_l_sh], 'visibility', 1.0)
+                r_sh_vis = getattr(pose_lms[idx_r_sh], 'visibility', 1.0)
+                l_el_vis = getattr(pose_lms[idx_l_el], 'visibility', 1.0)
+                r_el_vis = getattr(pose_lms[idx_r_el], 'visibility', 1.0)
+                
+                # Draw Shoulders Connection (Only if both visible)
+                if l_sh_vis > VISIBILITY_THRESHOLD and r_sh_vis > VISIBILITY_THRESHOLD:
                     cv2.line(frame, l_shoulder_px, r_shoulder_px, (255, 255, 0), 2)
-                 
-                 # Draw Left Arm (Shoulder -> Elbow)
-                 if l_sh_vis > VISIBILITY_THRESHOLD and l_el_vis > VISIBILITY_THRESHOLD:
+                
+                # Draw Left Arm (Shoulder -> Elbow)
+                if l_sh_vis > VISIBILITY_THRESHOLD and l_el_vis > VISIBILITY_THRESHOLD:
                     cv2.line(frame, l_shoulder_px, l_elbow_px, (255, 255, 0), 2)
                     left_elbow_px = l_elbow_px # Assign only if visible
-                 
-                 # Draw Right Arm (Shoulder -> Elbow)
-                 if r_sh_vis > VISIBILITY_THRESHOLD and r_el_vis > VISIBILITY_THRESHOLD:
+                
+                # Draw Right Arm (Shoulder -> Elbow)
+                if r_sh_vis > VISIBILITY_THRESHOLD and r_el_vis > VISIBILITY_THRESHOLD:
                     cv2.line(frame, r_shoulder_px, r_elbow_px, (255, 255, 0), 2)
                     right_elbow_px = r_elbow_px # Assign only if visible
-                 
-                 # Draw Points (Only visible ones)
-                 for i, px in enumerate(pose_px):
-                     vis = getattr(pose_lms[i], 'visibility', 1.0)
-                     if vis > VISIBILITY_THRESHOLD:
+                
+                # Draw Points (Only visible ones)
+                for i, px in enumerate(pose_px):
+                    vis = getattr(pose_lms[i], 'visibility', 1.0)
+                    if vis > VISIBILITY_THRESHOLD:
                         cv2.circle(frame, px, 5, (255, 0, 0), -1) # Blue
 
         if not hand_result or not hand_result.multi_hand_landmarks:
@@ -183,7 +183,7 @@ class Visualizer:
                 # 阈值设为 10cm，容忍误差
                 hand_z_cm = hand_pos['z'] * 100
                 if head_dist_cm > 0 and hand_z_cm > (head_dist_cm + 10.0):
-                     continue
+                    continue
                 
                 is_pinching = hand_pos.get('is_pinching', False)
                 pinch_pos = hand_pos.get('pinch_pos', (0,0,0))
@@ -198,9 +198,9 @@ class Visualizer:
             # Draw Connection from Elbow to Wrist (Index 0)
             wrist_px = landmarks_px[0]
             if hand_label == "Left" and left_elbow_px:
-                 cv2.line(frame, left_elbow_px, wrist_px, (255, 255, 0), 2)
+                cv2.line(frame, left_elbow_px, wrist_px, (255, 255, 0), 2)
             elif hand_label == "Right" and right_elbow_px:
-                 cv2.line(frame, right_elbow_px, wrist_px, (255, 255, 0), 2)
+                cv2.line(frame, right_elbow_px, wrist_px, (255, 255, 0), 2)
 
             # Draw connections
             for connection in self.HAND_CONNECTIONS:
@@ -437,14 +437,14 @@ class Visualizer:
             # 显示 Head Yaw
             # Tracker 中应该存储了 yaw
             if hasattr(tracker, 'current_yaw'):
-                 yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
-                 cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
+                yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
+                cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
 
         # 绘制视线交点信息
         if self.cached_viz_data['text'] is not None:
-             gaze_text = self.cached_viz_data['text']
-             color = self.cached_viz_data['text_color']
-             cv2.putText(frame, gaze_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
+            gaze_text = self.cached_viz_data['text']
+            color = self.cached_viz_data['text_color']
+            cv2.putText(frame, gaze_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
 
         # 绘制头部中心标记（黄色圆圈 + 'C'）
         if tracker.head_center_pos is not None:
