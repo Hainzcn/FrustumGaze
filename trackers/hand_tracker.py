@@ -251,7 +251,7 @@ class HandProcessorProcess(multiprocessing.Process):
             
         return False, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, hand_label=None):
+    def _calculate_hand_pos(self, landmarks, frame_width, frame_height, aspect_ratio, w_norm_filter=None, pos_filter=None, one_euro_filter_dict=None, timestamp=None, camera_matrix=None, hand_label=None, depth_length_history=None, anchor_state=None, grip_state=None, width_correction_state=None, frame_id=0):
         """
         计算手部空间位置 (Camera Space) 和 Yaw 角
         完全弃用 PnP，改用几何特征计算
@@ -331,6 +331,40 @@ class HandProcessorProcess(multiprocessing.Process):
         yaw = math.atan2(normal[0], normal[2])
         yaw_deg = math.degrees(yaw)
         
+        # 1.5 聚拢系数 (Grip Factor) 计算
+        # 提前计算以便用于深度融合权重调整
+        # 使用 Wrist(0) 到 Middle MCP(9) 作为参考长度
+        ref_len_grip = np.linalg.norm(p9 - p0)
+        grip_factor = 0.0
+        
+        if ref_len_grip > 1e-6:
+            tips_indices = [8, 12, 16, 20] # Index, Middle, Ring, Pinky tips
+            tips_dist_sum = 0.0
+            for idx in tips_indices:
+                pt = get_pt_unified(landmarks[idx])
+                tips_dist_sum += np.linalg.norm(pt - p0)
+            
+            avg_tips_dist = tips_dist_sum / 4.0
+            ratio = avg_tips_dist / ref_len_grip
+            
+            # 经验阈值: 展开时 ratio ~ 1.8+, 握拳时 ratio ~ 0.9
+            r_open = 1.8
+            r_closed = 0.9
+            
+            # 归一化到 [0, 1], 0=Open, 1=Closed
+            grip_factor = (r_open - ratio) / (r_open - r_closed)
+            grip_factor = max(0.0, min(grip_factor, 1.0))
+            
+            # EMA 平滑
+            if grip_state is not None:
+                # 获取上一帧的 grip_factor
+                last_grip = grip_state.get('value', 0.0)
+                # 应用 EMA: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+                alpha = settings.HAND_GRIP_SMOOTHING_ALPHA
+                grip_factor = alpha * grip_factor + (1.0 - alpha) * last_grip
+                # 更新状态
+                grip_state['value'] = grip_factor
+
         # 2. 估算 3D 位置 (Camera Space)
         # 使用几何相似三角形估算深度 Z
         # 我们使用两种参考长度进行加权估算，并应用角度校正，以提高鲁棒性
@@ -346,10 +380,10 @@ class HandProcessorProcess(multiprocessing.Process):
         REF_LENGTH_UP_M = settings.HAND_REF_LENGTH_M
         
         # 参数 B: 横向宽度 (Index MCP to Pinky MCP)
-        # 真实长度: ~0.055m (5.5cm - 6.0cm)
+        # 真实长度: ~0.06m (6.0cm)
         # 通常成年男性手掌宽度(MCP处)约 8-9cm，但 Index(5) 到 Pinky(17) 不包含拇指侧，且是掌骨头间距
-        # 约为手掌宽度的 2/3。这里取 0.058m (5.8cm) 作为经验值
-        REF_LENGTH_ACROSS_M = 0.058 
+        # 约为手掌宽度的 2/3。这里取 0.06m 作为经验值
+        REF_LENGTH_ACROSS_M = settings.HAND_REF_WIDTH_M
         
         # 计算 Pitch (绕 X 轴旋转)
         # Pitch = asin(-ny) (假设 normal 已经归一化)
@@ -370,13 +404,16 @@ class HandProcessorProcess(multiprocessing.Process):
         
         # 避免除零
         if dist_up_2d < 1e-4:
-            z_up = 0.5
+            z_up_raw = 0.5
         else:
             # 限制校正角度，避免 90 度时 cos 为 0
-            cos_pitch = max(0.2, math.cos(pitch)) 
+            # 使用 abs(cos) 处理手背朝向 (Pitch ~ 180) 的情况
+            # 当 Pitch ~ 0 (手心正对) 或 180 (手背正对) 时，cos ~ 1，投影最大，估算最准
+            # 当 Pitch ~ 90 (指尖对准相机) 时，cos ~ 0，投影最小，估算不准
+            cos_pitch = max(0.2, abs(math.cos(pitch))) 
             len_px_up = dist_up_2d * frame_width
             # 计算 Z
-            z_up = (focal_length * REF_LENGTH_UP_M * cos_pitch) / len_px_up
+            z_up_raw = (focal_length * REF_LENGTH_UP_M * cos_pitch) / len_px_up
 
         # 估算 Z (基于 Across 向量 + Yaw 校正)
         # 投影长度 W_proj = W_real * cos(Yaw) * (f / Z)
@@ -388,19 +425,75 @@ class HandProcessorProcess(multiprocessing.Process):
             z_across = 0.5
         else:
             # 限制校正角度
-            cos_yaw = max(0.2, math.cos(yaw))
+            # 同理使用 abs(cos) 处理手背情况 (Yaw 可能接近 180 如果定义反转)
+            # 实际上 Yaw 通常在 -90 到 90 之间，但如果手背朝向，Normal 反转可能导致 Yaw 突变
+            # 无论 Normal 指向哪里，投影长度只与平面夹角有关，即 abs(dot(view, vec))
+            # 简单来说就是 abs(cos(angle))
+            cos_yaw = max(0.2, abs(math.cos(yaw)))
             len_px_across = dist_across_2d * frame_width
             z_across = (focal_length * REF_LENGTH_ACROSS_M * cos_yaw) / len_px_across
             
+        # --- 动态长度校准 (Dynamic Length Correction) ---
+        # 目的：确保 z_up 与 z_across 一致 (以 Width 为基准)，避免通道切换深度跳变
+        # 修改方向：反向校准，用 Width 校准 Length
+        
+        length_correction_factor = 1.0
+        if width_correction_state is not None:
+            # 复用 state 字典，虽然名字叫 width_correction_state，现在存的是 length correction
+            length_correction_factor = width_correction_state.get('value', 1.0)
+            
+            # 仅在手掌展开、静止且正对时更新校准系数
+            # 临时计算 motion_score (仅用于更新校准)
+            temp_motion_score = 1.0
+            if depth_length_history and len(depth_length_history) >= 2:
+                 # 注意：此时 history 还没 push 当前帧
+                 sigma = np.std(depth_length_history)
+                 avg = np.mean(depth_length_history)
+                 if avg > 1e-6:
+                     temp_motion_score = min(max(sigma / (avg * settings.HAND_DEPTH_SIGMA_THRESHOLD_RATIO), 0.0), 1.0)
+            
+            can_update_correction = (temp_motion_score < 0.2) and \
+                                    (grip_factor < 0.2) and \
+                                    (abs(yaw_deg) < 20.0) and \
+                                    (abs(pitch_deg) < 20.0)
+            
+            if can_update_correction:
+                # 计算目标系数: z_across / z_up_raw
+                # 目标是 z_up_corrected = z_up_raw * factor ≈ z_across
+                # 所以 factor = z_across / z_up_raw
+                target_factor = z_across / z_up_raw
+                target_factor = max(0.5, min(target_factor, 2.0))
+                
+                # EMA 更新
+                alpha_corr = 0.05 # 慢速更新
+                length_correction_factor = alpha_corr * target_factor + (1.0 - alpha_corr) * length_correction_factor
+                width_correction_state['value'] = length_correction_factor
+        
+        # 应用校准
+        z_up = z_up_raw * length_correction_factor
+
         # 融合策略
         # 哪个角度小，哪个维度的投影就更可靠 (cos值大，受噪声影响小)
-        # 使用 cos 值作为权重
-        w_up = max(0.2, math.cos(pitch))
-        w_across = max(0.2, math.cos(yaw))
+        # 使用 cos 值作为权重，同样取绝对值
+        w_up = max(0.2, abs(math.cos(pitch)))
+        w_across = max(0.2, abs(math.cos(yaw)))
         
+        # 根据聚拢系数调整权重：握拳时 (grip_factor -> 1)，减少长度通道 (Up) 的权重
+        # 目标：握拳时 w_up = 0，展开时 w_up 不变
+        w_up *= (1.0 - grip_factor)
+
         # 归一化权重
         w_sum = w_up + w_across
         z_est = (z_up * w_up + z_across * w_across) / w_sum
+        
+        # 记录详细调试参数
+        depth_details = {
+            'z_up': z_up,
+            'z_across': z_across,
+            'w_up': w_up / w_sum,
+            'w_across': w_across / w_sum,
+            'len_corr': length_correction_factor # Rename for clarity
+        }
         
         # 备选简单策略：如果 Yaw 很大 (>60度)，主要信赖 Up；如果 Pitch 很大，主要信赖 Across
         # 上述加权已隐含此逻辑
@@ -429,7 +522,89 @@ class HandProcessorProcess(multiprocessing.Process):
         # fy usually equals fx
         y_est = (center_y_px - cy) * z_est / focal_length
         
-        # 3. 滤波
+        # 3. 深度变化率检测 (Motion Score)
+        motion_score = 0.0
+        if depth_length_history is not None:
+            # 添加当前长度通道深度估计值到历史
+            depth_length_history.append(z_up)
+            if len(depth_length_history) > settings.HAND_DEPTH_HISTORY_SIZE:
+                depth_length_history.pop(0)
+            
+            # 计算标准差
+            if len(depth_length_history) >= 2:
+                sigma_length = np.std(depth_length_history)
+                
+                # 计算阈值 (2-3% 的当前深度值，或者历史平均深度值)
+                # 使用历史平均值更稳定
+                avg_depth = np.mean(depth_length_history)
+                sigma_threshold = avg_depth * settings.HAND_DEPTH_SIGMA_THRESHOLD_RATIO
+                
+                # 避免除零
+                if sigma_threshold < 1e-6:
+                    sigma_threshold = 1e-6
+                    
+                # 计算 motion_score
+                motion_score = min(max(sigma_length / sigma_threshold, 0.0), 1.0)
+
+        # 3.2 动态噪声 R 计算
+        # R = R_base + k * R_max * (1 - motion_score)
+        r_base = settings.HAND_KALMAN_R_BASE
+        r_grip_max = settings.HAND_KALMAN_R_GRIP_MAX
+        
+        r_dynamic = r_base + grip_factor * r_grip_max * (1.0 - motion_score)
+
+        # 3.3 深度锚定 (Depth Anchor) 逻辑
+        # 维护一个"锚定深度值"，当 Yaw 较小且手掌展开时更新
+        # 当握拳时，将锚定值作为额外权重注入深度估计
+        
+        anchor_weight = 0.0
+        anchor_depth = 0.0
+        
+        if anchor_state is not None:
+            # 检查是否可以更新锚定值
+            # Yaw 绝对值低于阈值 且 手掌展开 (grip_factor 低)
+            can_update_anchor = (abs(yaw_deg) < settings.HAND_DEPTH_ANCHOR_YAW_THRESHOLD) and \
+                                (grip_factor < settings.HAND_DEPTH_ANCHOR_GRIP_THRESHOLD)
+                                
+            if can_update_anchor:
+                # 更新锚定值 (使用当前 Across 通道深度，因为它在正面时更准，或者使用融合深度 z_est)
+                # 这里使用 z_est，因为它是经过 Yaw/Pitch 校正融合的
+                anchor_state['value'] = z_est
+                anchor_state['frame_id'] = frame_id
+                anchor_state['timestamp'] = timestamp if timestamp else time.time()
+                
+            # 计算锚定权重并应用融合
+            # 只有在握拳状态 (grip_factor > 0) 且有有效锚定值时才应用
+            if anchor_state['value'] > 0 and grip_factor > 0:
+                # 1. 新鲜度衰减
+                frames_since_update = frame_id - anchor_state['frame_id']
+                if frames_since_update < 0: frames_since_update = 0
+                
+                # 半衰期计算 decay = exp(-t / tau)
+                # tau = half_life / ln(2)
+                half_life = settings.HAND_DEPTH_ANCHOR_HALFLIFE_FRAMES
+                decay = math.exp(-frames_since_update * 0.693 / half_life)
+                
+                # 2. 运动衰减 (静止时权重高)
+                motion_factor = 1.0 - motion_score
+                
+                # 3. 聚拢系数 (握拳越深，越依赖锚定)
+                # grip_factor 已经在 0-1 之间
+                
+                # 综合权重
+                w_anchor = decay * motion_factor * grip_factor
+                
+                # 限制最大权重，避免过度锁定
+                w_anchor = min(w_anchor, 0.8) 
+                
+                anchor_weight = w_anchor
+                anchor_depth = anchor_state['value']
+                
+                # 融合深度
+                # z_final = (1 - w) * z_current + w * z_anchor
+                z_est = (1.0 - w_anchor) * z_est + w_anchor * anchor_depth
+
+        # 4. 滤波
         
         # Yaw Filter
         if one_euro_filter_dict is not None and timestamp is not None:
@@ -443,13 +618,14 @@ class HandProcessorProcess(multiprocessing.Process):
             
         # Pos Filter
         if pos_filter:
-            x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est)
+            # 应用动态 R (仅 Z 轴)
+            x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est, R_z=r_dynamic)
             
         # W_norm (for compatibility/visualizer)
         # Just use distance between 5 and 17 in unified space
         w_norm = np.linalg.norm(p17 - p5)
         
-        return x_est, y_est, z_est, w_norm, yaw_deg, pitch_deg
+        return x_est, y_est, z_est, w_norm, yaw_deg, pitch_deg, motion_score, grip_factor, depth_details
 
     def run(self):
         # --- 在子进程中初始化资源 ---
@@ -498,7 +674,11 @@ class HandProcessorProcess(multiprocessing.Process):
                 'pos': Simple3DKalmanFilter(
                     process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
                     measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
-                )
+                ),
+                'depth_length_history': [],
+                'depth_anchor': {'value': 0.0, 'frame_id': 0, 'timestamp': 0.0},
+                'width_correction': {'value': 1.0, 'count': 0},
+                'grip_state': {'value': 0.0}
             },
             'Right': {
                 'w_norm': OneEuroFilter(
@@ -509,7 +689,11 @@ class HandProcessorProcess(multiprocessing.Process):
                 'pos': Simple3DKalmanFilter(
                     process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
                     measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
-                )
+                ),
+                'depth_length_history': [],
+                'depth_anchor': {'value': 0.0, 'frame_id': 0, 'timestamp': 0.0},
+                'width_correction': {'value': 1.0, 'count': 0},
+                'grip_state': {'value': 0.0}
             }
         }
 
@@ -690,6 +874,10 @@ class HandProcessorProcess(multiprocessing.Process):
                         w_norm_filter = None
                         pos_filter = None
                         one_euro_filter_dict = None
+                        depth_length_history = None
+                        anchor_state = None
+                        grip_state = None
+                        width_correction_state = None
                         label = "Unknown"
                         
                         if result_lite.multi_handedness and idx < len(result_lite.multi_handedness):
@@ -700,19 +888,28 @@ class HandProcessorProcess(multiprocessing.Process):
                                 if label in self.hand_filters:
                                     w_norm_filter = self.hand_filters[label]['w_norm']
                                     pos_filter = self.hand_filters[label]['pos']
+                                    depth_length_history = self.hand_filters[label]['depth_length_history']
+                                    anchor_state = self.hand_filters[label]['depth_anchor']
+                                    grip_state = self.hand_filters[label]['grip_state']
+                                    width_correction_state = self.hand_filters[label]['width_correction']
                                     # 检查是否有 OneEuroFilter 字典用于关键点滤波
                                     if 'landmarks' not in self.hand_filters[label]:
                                         self.hand_filters[label]['landmarks'] = {}
                                     one_euro_filter_dict = self.hand_filters[label]['landmarks']
                         
-                        x, y, z, w_norm, yaw, pitch = self._calculate_hand_pos(
+                        x, y, z, w_norm, yaw, pitch, motion_score, grip_factor, depth_details = self._calculate_hand_pos(
                             landmarks, target_w, target_h, aspect_ratio, 
                             w_norm_filter=w_norm_filter, 
                             pos_filter=pos_filter, 
                             one_euro_filter_dict=one_euro_filter_dict,
                             timestamp=timestamp_ms / 1000.0,
                             camera_matrix=cached_camera_matrix,
-                            hand_label=label
+                            hand_label=label,
+                            depth_length_history=depth_length_history,
+                            anchor_state=anchor_state,
+                            grip_state=grip_state,
+                            width_correction_state=width_correction_state,
+                            frame_id=frame_id
                         )
                         
                         if x is not None:
@@ -728,6 +925,9 @@ class HandProcessorProcess(multiprocessing.Process):
                                 'yaw': yaw,
                                 'pitch': pitch,
                                 'w_norm': w_norm,
+                                'motion_score': motion_score,
+                                'grip_factor': grip_factor,
+                                'depth_details': depth_details,
                                 'landmarks': landmarks,
                                 'is_pinching': is_pinching,
                                 'pinch_pos': (px, py, pz),

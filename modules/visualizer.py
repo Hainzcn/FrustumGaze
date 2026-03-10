@@ -257,6 +257,24 @@ class Visualizer:
                 angle_text = f"Yaw:{yaw_val:.0f} Pitch:{pitch_val:.0f}"
                 cv2.putText(frame, angle_text, (wx, wy + 40), self.FONT, self.FONT_SCALE_TEXT, text_color, self.FONT_THICKNESS)
                 
+                # 绘制详细深度信息
+                depth_details = hand_pos.get('depth_details', {})
+                if depth_details:
+                    z_up = depth_details.get('z_up', 0.0)
+                    z_across = depth_details.get('z_across', 0.0)
+                    w_up = depth_details.get('w_up', 0.0)
+                    w_across = depth_details.get('w_across', 0.0)
+                    # Use 'len_corr' instead of 'width_corr' to reflect the change
+                    len_corr = depth_details.get('len_corr', 1.0)
+                    
+                    detail_text_1 = f"Z_UP:{z_up:.2f}m (W:{w_up:.2f})"
+                    detail_text_2 = f"Z_AC:{z_across:.2f}m (W:{w_across:.2f})"
+                    detail_text_3 = f"L-Corr:{len_corr:.2f}"
+                    
+                    cv2.putText(frame, detail_text_1, (wx, wy + 60), self.FONT, 0.4, (200, 200, 200), 1)
+                    cv2.putText(frame, detail_text_2, (wx, wy + 75), self.FONT, 0.4, (200, 200, 200), 1)
+                    cv2.putText(frame, detail_text_3, (wx, wy + 90), self.FONT, 0.4, (200, 200, 200), 1)
+                
                 # 如果捏起，显示指尖位置信息 (已取消空间坐标显示，只保留2D标记)
                 if is_pinching:
                     # 绘制捏起点半透明圆

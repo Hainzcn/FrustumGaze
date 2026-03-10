@@ -68,7 +68,11 @@ class Simple3DKalmanFilter:
         self.kalman.measurementNoiseCov = np.eye(3, dtype=np.float32) * measurement_noise
         self.kalman.errorCovPost = np.eye(6, dtype=np.float32)
 
-    def update(self, x, y, z):
+    def update(self, x, y, z, R_z=None):
+        if R_z is not None:
+             # 只更新 Z 轴的观测噪声，并确保类型为 float32
+             self.kalman.measurementNoiseCov[2, 2] = np.float32(R_z)
+             
         measurement = np.array([[np.float32(x)], [np.float32(y)], [np.float32(z)]])
         self.kalman.correct(measurement)
         prediction = self.kalman.predict()

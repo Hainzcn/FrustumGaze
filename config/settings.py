@@ -30,6 +30,23 @@ HAND_YAW_ONE_EURO_MIN_CUTOFF = 1.0
 HAND_YAW_ONE_EURO_BETA = 0.0
 HAND_YAW_ONE_EURO_D_CUTOFF = 1.0
 
+# 手部深度变化率检测参数
+HAND_DEPTH_HISTORY_SIZE = 15 # 历史窗口大小 (帧数)
+HAND_DEPTH_SIGMA_THRESHOLD_RATIO = 0.03 # 深度估计值的波动阈值比例 (2-3%)
+
+# 手部位置卡尔曼滤波动态噪声参数
+HAND_KALMAN_R_BASE = 0.1 # 基础观测噪声 (与原 MEASUREMENT_NOISE 保持一致)
+HAND_KALMAN_R_GRIP_MAX = 1.0 # 握拳时的最大附加观测噪声
+HAND_GRIP_REF_SCALE = 1.2 # 展开时指尖距离参考长度的倍数 (用于归一化聚拢系数)
+
+# 手部深度锚定参数
+HAND_DEPTH_ANCHOR_YAW_THRESHOLD = 15.0 # 记录锚定值的 Yaw 阈值 (度)
+HAND_DEPTH_ANCHOR_GRIP_THRESHOLD = 0.2 # 记录锚定值的聚拢系数阈值 (展开)
+HAND_DEPTH_ANCHOR_HALFLIFE_FRAMES = 45 # 锚定值权重衰减半衰期 (帧数)
+
+# 手部聚拢系数平滑参数
+HAND_GRIP_SMOOTHING_ALPHA = 0.3 # EMA 滤波系数 (值越小越平滑，0.3 对应较快响应)
+
 # 人脸距离一元滤波参数
 FACE_DIST_ONE_EURO_MIN_CUTOFF = 0.3
 FACE_DIST_ONE_EURO_BETA = 0.3
@@ -154,6 +171,7 @@ OUTER_EYE_DIST_CM = P_OUTER_EYE_DIST_MM / 10.0
 
 # Hand Constants
 HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.
+HAND_REF_WIDTH_M = 0.06 # Reference width (Index MCP to Pinky MCP) for depth estimation. 6cm.
 PINCH_THRESHOLD_M = 0.02  # 2cm threshold for pinch detection
 
 # --- Tracking Confidence Thresholds ---
