@@ -10,65 +10,95 @@ VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计
 EYE_TRACKING_INTERVAL = 1
 HAND_TRACKING_INTERVAL = 1 # 手部追踪频率 (每多少帧进行一次手部检测)
 POSE_TRACKING_INTERVAL = 6 # 姿态追踪频率 (每多少帧进行一次姿态检测)
-EYE_GAZE_CALCULATION_INTERVAL = 2 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
-GAZE_RENDER_INTERVAL = 2 # 视线线段渲染频率 (每多少帧更新一次)
+EYE_GAZE_CALCULATION_INTERVAL = 3 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
+GAZE_RENDER_INTERVAL = 3 # 视线线段渲染频率 (每多少帧更新一次)
 FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
 
-# 滤波器参数设置
+# 滤波器参数配置 (Hierarchical Filter Configuration)
+FILTER_CONFIG = {
+    # Level 1: 关键点滤波 (Shared Keypoint Filtering)
+    # 用于平滑 MediaPipe 原始输出坐标 (Normalized x, y, z)
+    'KEYPOINT': {
+        'min_cutoff': 1.0,  # 默认截止频率 (Hz) - 较高值减少延迟
+        'beta': 0.5,        # 速度系数 - 较高值在快速运动时减少延迟
+        'd_cutoff': 1.0     # 导数截止频率 (Hz)
+    },
 
-# 手部距离一元滤波参数
-HAND_DIST_ONE_EURO_MIN_CUTOFF = 0.5
-HAND_DIST_ONE_EURO_BETA = 0.2
-HAND_DIST_ONE_EURO_D_CUTOFF = 1.0
+    # Level 2 & 3: 高级数据滤波 (High-Level Data Filtering)
+    'HAND': {
+        # 3D 空间位置 (Kalman Filter)
+        'POSITION': {
+            'process_noise': 0.01,     # Q: 过程噪声 (信任模型)
+            'measurement_noise': 0.1,  # R: 测量噪声 (信任测量)
+            'r_grip_max': 1.0,         # 握拳时的最大附加测量噪声
+        },
+        # 归一化宽度/尺度 (OneEuro)
+        'SCALE': {
+            'min_cutoff': 0.5,
+            'beta': 0.2,
+            'd_cutoff': 1.0
+        },
+        # Yaw 角度 (OneEuro)
+        'YAW': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # Pitch 角度 (OneEuro)
+        'PITCH': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # 像素距离 (Pixel Distance) (OneEuro)
+        'PIXEL_DIST': {
+            'min_cutoff': 1.0,  # 较高以保持对快速运动的响应
+            'beta': 0.2,        # 适度平滑
+            'd_cutoff': 1.0
+        },
+        # 深度 Z 值 (OneEuro - Pre-XY Calculation)
+        'Z_VAL': {
+            'min_cutoff': 0.5,  # 较低以获得更稳定的 Z
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        },
+        # 深度动态参数
+        'DEPTH': {
+            'history_size': 15,
+            'sigma_threshold_ratio': 0.03,
+            'anchor_yaw_threshold': 15.0,
+            'anchor_grip_threshold': 0.2,
+            'anchor_halflife_frames': 45,
+            'grip_smoothing_alpha': 0.3,
+            'grip_ref_scale': 1.2
+        }
+    },
 
-# Hand Kalman Filter Parameters (for 3D position smoothing)
-HAND_KALMAN_PROCESS_NOISE = 0.01    # Q: Process noise covariance (trust in model)
-HAND_KALMAN_MEASUREMENT_NOISE = 0.1 # R: Measurement noise covariance (trust in measurement)
-
-# 手部 Yaw 角 OneEuroFilter 参数
-HAND_YAW_ONE_EURO_MIN_CUTOFF = 1.0
-HAND_YAW_ONE_EURO_BETA = 0.0
-HAND_YAW_ONE_EURO_D_CUTOFF = 1.0
-
-# 手部深度变化率检测参数
-HAND_DEPTH_HISTORY_SIZE = 15 # 历史窗口大小 (帧数)
-HAND_DEPTH_SIGMA_THRESHOLD_RATIO = 0.03 # 深度估计值的波动阈值比例 (2-3%)
-
-# 手部位置卡尔曼滤波动态噪声参数
-HAND_KALMAN_R_BASE = 0.1 # 基础观测噪声 (与原 MEASUREMENT_NOISE 保持一致)
-HAND_KALMAN_R_GRIP_MAX = 1.0 # 握拳时的最大附加观测噪声
-HAND_GRIP_REF_SCALE = 1.2 # 展开时指尖距离参考长度的倍数 (用于归一化聚拢系数)
-
-# 手部深度锚定参数
-HAND_DEPTH_ANCHOR_YAW_THRESHOLD = 15.0 # 记录锚定值的 Yaw 阈值 (度)
-HAND_DEPTH_ANCHOR_GRIP_THRESHOLD = 0.2 # 记录锚定值的聚拢系数阈值 (展开)
-HAND_DEPTH_ANCHOR_HALFLIFE_FRAMES = 45 # 锚定值权重衰减半衰期 (帧数)
-
-# 手部聚拢系数平滑参数
-HAND_GRIP_SMOOTHING_ALPHA = 0.3 # EMA 滤波系数 (值越小越平滑，0.3 对应较快响应)
-
-# 人脸距离一元滤波参数
-FACE_DIST_ONE_EURO_MIN_CUTOFF = 0.3
-FACE_DIST_ONE_EURO_BETA = 0.3
-FACE_DIST_ONE_EURO_D_CUTOFF = 1.0
-
-# 人脸位置一元滤波参数
-FACE_POS_ONE_EURO_MIN_CUTOFF = 1.0
-FACE_POS_ONE_EURO_BETA = 0.0
-FACE_POS_ONE_EURO_D_CUTOFF = 1.0
-
-# 头部 Yaw 角 OneEuroFilter 参数
-FACE_YAW_ONE_EURO_MIN_CUTOFF = 1.0
-FACE_YAW_ONE_EURO_BETA = 0.0
-FACE_YAW_ONE_EURO_D_CUTOFF = 1.0
-
-# 人脸距离卡尔曼滤波参数
-FACE_DIST_KALMAN_Q = 0.1 # Process Noise (Q)
-FACE_DIST_KALMAN_R = 5.0 # Measurement Noise (R)
-
-# 人脸位置偏移卡尔曼滤波参数
-FACE_OFFSET_KALMAN_Q = 0.3 # Process Noise (Q)
-FACE_OFFSET_KALMAN_R = 0.1 # Measurement Noise (R)
+    'FACE': {
+        # 距离估算 (Kalman Filter)
+        'DISTANCE': {
+            'process_noise': 0.1,  # Q
+            'measurement_noise': 5.0 # R
+        },
+        # 中心偏移量 (Kalman Filter)
+        'OFFSET': {
+            'process_noise': 0.3,  # Q
+            'measurement_noise': 0.1 # R
+        },
+        # Yaw 角度 (OneEuro)
+        'YAW': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # 虹膜/眼球中心 (OneEuro - 通常需要更平滑)
+        'IRIS': {
+            'min_cutoff': 0.5,
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        }
+    }
+}
 
 # Network
 UDP_IP = "127.0.0.1"

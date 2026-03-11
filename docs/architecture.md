@@ -128,62 +128,77 @@ graph TD
 4.  **Zero-Copy 共享内存**: 消除进程间图像传输的开销。
 5.  **MJPEG 视频流**: 摄像头采集使用 MJPEG 格式，减少 USB 带宽占用，提高帧率。
 
-## 5. 滤波策略详解 (Filtering Strategy)
+## 5. 级联滤波策略 (Cascading Filter Strategy)
 
-为了解决由于光照变化、传感器噪声以及计算机视觉模型本身的抖动带来的数据不稳定性，系统实施了多级滤波策略。
+为解决传感器噪声、光照变化及模型抖动问题，系统采用**级联滤波架构 (Cascading Architecture)**，将滤波处理分为三个层级。
 
-### 5.1 滤波器类型
+### 5.1 滤波器配置层级 (`config/settings.py`)
 
-1.  **OneEuroFilter (一欧元滤波器)**
-    *   **原理**: 一种自适应的一阶低通滤波器。在低速运动时降低截止频率以减少抖动（高平滑），在高速运动时提高截止频率以减少延迟（高响应）。
-    *   **应用场景**: 2D 关键点坐标、旋转角度（Yaw）、手部归一化距离。
-    *   **核心参数**: `min_cutoff` (最小截止频率), `beta` (速度系数), `d_cutoff` (导数截止频率)。
+参数配置采用分层结构，确保逻辑清晰且易于维护：
 
-2.  **Simple3DKalmanFilter (简单 3D 卡尔曼滤波器)**
-    *   **原理**: 标准线性卡尔曼滤波，用于平滑 3D 空间坐标 (X, Y, Z)。假设匀速运动模型。
-    *   **应用场景**: 手部最终输出的 3D 世界坐标。
-    *   **核心参数**: `process_noise` (过程噪声 Q), `measurement_noise` (测量噪声 R)。
+*   **Level 1: 基础关键点滤波 (KEYPOINT)**
+    *   **共享参数**: 手部和人脸的关键点共用一套 `OneEuroFilter` 参数。
+    *   **目的**: 在进行任何几何计算前，先平滑 MediaPipe 的原始坐标数据，从源头抑制抖动。
+    *   **核心参数**: `min_cutoff` (1.0Hz), `beta` (0.5)。
 
-3.  **OneDKalmanFilter (一维卡尔曼滤波器)**
-    *   **原理**: 针对标量值的一维卡尔曼滤波。
-    *   **应用场景**: 人脸距离估算 (`dist`)、人脸中心偏移量 (`offset_x`, `offset_y`)。
+*   **Level 2 & 3: 高级数据滤波 (HAND/FACE)**
+    *   **专用参数**: 针对解算后的高维数据（如 3D 坐标、Yaw 角、距离）进行二次平滑。
+    *   **手部 (HAND)**: 包含位置 (Kalman)、尺度 (OneEuro)、深度动态 (Depth Dynamics)。
+    *   **人脸 (FACE)**: 包含距离 (Kalman)、偏移 (Kalman)、Yaw (OneEuro)、虹膜 (Iris)。
 
-### 5.2 滤波流程
+### 5.2 滤波流程详解
 
-#### 5.2.1 人脸追踪 (Face Tracking)
+#### 5.2.1 手部追踪流水线
 
 ```mermaid
 graph LR
-    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点]
-    SmoothLandmarks -->|PnP Solver| Pose[头部姿态 (R, T)]
-    Pose -->|计算| Dist[距离估算]
-    Dist -->|OneDKalmanFilter| SmoothDist[平滑距离]
-    Pose -->|计算| Offset[中心偏移]
-    Offset -->|OneDKalmanFilter| SmoothOffset[平滑偏移]
+    Raw[MediaPipe Raw] -->|L1: Shared OneEuro| Keypoints[平滑关键点]
+    Keypoints -->|L2: Geometry| Calc[计算 Yaw/Pitch/Z]
+    Calc -->|L3: OneEuro| SmoothYaw[平滑 Yaw]
+    Calc -->|L3: Dynamic Kalman| SmoothPos[平滑 3D 坐标]
+    Calc -->|L3: Depth Dynamics| StableDepth[深度锚定]
 ```
 
-*   **关键点级**: 对参与 PnP 解算的 6 个关键点 (眼角、鼻尖、嘴角等) 先进行 `OneEuroFilter` 滤波，减少输入噪声。
-*   **数据级**: 解算出的距离和偏移量再次经过 `OneDKalmanFilter`，确保数值输出的稳定性，避免 UI 忽大忽小。
+1.  **Level 1 (关键点级)**: 对 0(Wrist), 5, 9, 17(MCPs) 等骨骼关键点进行 `OneEuroFilter`。
+2.  **Level 2 (几何解算)**: 基于平滑后的关键点计算 Yaw 角、Pitch 角、初始深度 Z。
+3.  **Level 3 (数据级)**:
+    *   **Yaw**: 再次经过 `OneEuroFilter`。
+    *   **Position (X,Y,Z)**: 输入 `Simple3DKalmanFilter`，并结合握拳状态和运动速度动态调整测量噪声 (R)。
+    *   **Depth Dynamics**: 使用历史窗口分析深度稳定性，结合锚定机制 (Anchoring) 锁定静止时的深度值。
 
-#### 5.2.2 手部追踪 (Hand Tracking)
+#### 5.2.2 人脸追踪流水线
 
 ```mermaid
 graph LR
-    Raw[MediaPipe Landmarks] -->|OneEuroFilter| SmoothLandmarks[平滑关键点 (0,5,9...)]
-    SmoothLandmarks -->|几何计算| Yaw[Yaw 角度]
-    Yaw -->|OneEuroFilter| SmoothYaw[平滑 Yaw]
-    SmoothLandmarks -->|几何计算| Pos3D[3D 坐标 (X,Y,Z)]
-    Pos3D -->|Simple3DKalmanFilter| SmoothPos3D[平滑 3D 坐标]
+    Raw[MediaPipe Raw] -->|L1: Shared OneEuro| Keypoints[平滑关键点]
+    Keypoints -->|L2: PnP Solver| Pose[头部姿态]
+    Keypoints -->|L2: Geometry| Dist[距离估算]
+    Pose -->|L3: OneEuro| SmoothYaw[平滑 Yaw]
+    Dist -->|L3: Kalman| FinalData[平滑距离/偏移]
 ```
 
-*   **关键点级**: 对指尖和手掌中心等关键点进行 `OneEuroFilter`。
-*   **结果级**:
-    *   计算出的 **Yaw 角度** 再次通过 `OneEuroFilter`。
-    *   计算出的 **3D 坐标** 通过 `Simple3DKalmanFilter` 进行平滑。
+1.  **Level 1 (关键点级)**: 对参与 PnP 解算的 6 个关键点 (眼角、鼻尖等) 以及虹膜中心进行 `OneEuroFilter`。
+2.  **Level 2 (几何解算)**:
+    *   **PnP**: 解算头部旋转和平移。
+    *   **Distance**: 基于眼间距计算深度。
+3.  **Level 3 (数据级)**:
+    *   **Yaw**: 对解算出的 Yaw 角进行滤波。
+    *   **Distance/Offset**: 使用 `OneDKalmanFilter` 平滑最终输出的距离和屏幕偏移量。
 
-### 5.3 参数调优
+### 5.3 核心算法：动态卡尔曼滤波
 
-所有滤波参数均在 `config/settings.py` 中集中管理，可根据实际体验进行微调：
+在手部追踪中，为了平衡"快速移动时的响应性"和"静止时的稳定性"，系统实现了动态噪声调整：
 
-*   **减少抖动**: 降低 `min_cutoff`，增加 `beta` (OneEuro); 减小 `process_noise`，增大 `measurement_noise` (Kalman)。
-*   **降低延迟**: 增大 `min_cutoff` (OneEuro); 增大 `process_noise` (Kalman)。
+$$ R_{dynamic} = R_{base} + R_{grip\_penalty} \times (1.0 - MotionScore) $$
+
+*   **$R_{base}$**: 基础测量噪声。
+*   **$R_{grip\_penalty}$**: 当检测到握拳（不稳定状态）时增加的噪声惩罚。
+*   **$MotionScore$**: 基于深度历史方差计算的运动分数 (0~1)。运动越剧烈，R 越接近 Base（高响应）；越静止，R 越大（高平滑）。
+
+### 5.4 参数调优指南
+
+所有滤波参数均在 `config/settings.py` 的 `FILTER_CONFIG` 字典中管理：
+
+*   **全局调整**: 修改 `KEYPOINT` 下的 `beta` 值。增加 `beta` 可显著降低快速运动时的延迟，但会增加微小抖动。
+*   **手部特调**: 若手部悬停时抖动，增大 `HAND.POSITION.measurement_noise` 或 `r_grip_max`。
+*   **人脸特调**: 若视线光标漂移，减小 `FACE.OFFSET.process_noise` (Q) 或增大 `measurement_noise` (R)。

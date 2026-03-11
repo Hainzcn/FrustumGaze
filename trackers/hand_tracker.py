@@ -48,21 +48,26 @@ class HandTracker:
         }
 
     def _create_filter_state(self):
+        # 使用新的分层配置
+        hand_config = settings.FILTER_CONFIG['HAND']
+        scale_config = hand_config['SCALE']
+        pos_config = hand_config['POSITION']
+        
         return {
             'w_norm': OneEuroFilter(
-                min_cutoff=settings.HAND_DIST_ONE_EURO_MIN_CUTOFF, 
-                beta=settings.HAND_DIST_ONE_EURO_BETA,
-                d_cutoff=settings.HAND_DIST_ONE_EURO_D_CUTOFF
+                min_cutoff=scale_config['min_cutoff'], 
+                beta=scale_config['beta'],
+                d_cutoff=scale_config['d_cutoff']
             ),
             'pos': Simple3DKalmanFilter(
-                process_noise=settings.HAND_KALMAN_PROCESS_NOISE, 
-                measurement_noise=settings.HAND_KALMAN_MEASUREMENT_NOISE
+                process_noise=pos_config['process_noise'], 
+                measurement_noise=pos_config['measurement_noise']
             ),
             'depth_length_history': [],
             'depth_anchor': {'value': 0.0, 'frame_id': 0, 'timestamp': 0.0},
             'width_correction': {'value': 1.0, 'count': 0},
             'grip_state': {'value': 0.0},
-            'landmarks': {} # OneEuroFilter dict
+            'landmarks': {} # OneEuroFilter dict for keypoints
         }
 
     def _init_mediapipe(self):
@@ -289,14 +294,46 @@ class HandTracker:
              width_correction_state = state['width_correction']
              one_euro_filter_dict = state['landmarks']
         
-        def get_pt_unified(lm):
+        # --- Level 1: Keypoint Filtering ---
+        # 预先对关键点进行 OneEuro 滤波
+        filtered_landmarks = {} # Cache for filtered landmarks
+        
+        def get_filtered_lm(idx):
+            lm = landmarks[idx]
+            if one_euro_filter_dict is not None and timestamp is not None:
+                # 懒加载过滤器
+                kx, ky, kz = f"lm_{idx}_x", f"lm_{idx}_y", f"lm_{idx}_z"
+                
+                # 使用共享的关键点滤波参数
+                kp_config = settings.FILTER_CONFIG['KEYPOINT']
+                
+                if kx not in one_euro_filter_dict:
+                    one_euro_filter_dict[kx] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
+                    one_euro_filter_dict[ky] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
+                    one_euro_filter_dict[kz] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
+                
+                fx = one_euro_filter_dict[kx].filter(lm.x, timestamp)
+                fy = one_euro_filter_dict[ky].filter(lm.y, timestamp)
+                fz = one_euro_filter_dict[kz].filter(lm.z, timestamp)
+                return LandmarkLite(fx, fy, fz)
+            return lm
+
+        def get_pt_unified(idx):
+            # 获取经过滤波的点，并转换为统一坐标系
+            if idx not in filtered_landmarks:
+                filtered_landmarks[idx] = get_filtered_lm(idx)
+            lm = filtered_landmarks[idx]
             return np.array([lm.x, lm.y * (1.0 / aspect_ratio), lm.z])
 
-        p0 = get_pt_unified(landmarks[0])   # Wrist
-        p5 = get_pt_unified(landmarks[5])   # Index MCP
-        p9 = get_pt_unified(landmarks[9])   # Middle MCP
-        p17 = get_pt_unified(landmarks[17]) # Pinky MCP
+        # 获取关键点 (0: Wrist, 5: Index MCP, 9: Middle MCP, 17: Pinky MCP)
+        p0 = get_pt_unified(0)
+        p5 = get_pt_unified(5)
+        p9 = get_pt_unified(9)
+        p17 = get_pt_unified(17)
         
+        # --- Level 2: Geometric Calculation ---
+        
+        # 1. Calculate Yaw
         v_up = p9 - p0
         v_across = p17 - p5
         
@@ -315,7 +352,35 @@ class HandTracker:
         yaw = math.atan2(normal[0], normal[2])
         yaw_deg = math.degrees(yaw)
         
-        # Grip Factor
+        # 2. Calculate Pitch (Approx)
+        pitch = math.asin(np.clip(-normal[1], -1.0, 1.0))
+        pitch_deg = math.degrees(pitch)
+        
+        # --- Level 2 Filter: Angles ---
+        if one_euro_filter_dict is not None and timestamp is not None:
+             # Yaw Filtering
+             yaw_config = settings.FILTER_CONFIG['HAND']['YAW']
+             if 'yaw' not in one_euro_filter_dict:
+                 one_euro_filter_dict['yaw'] = OneEuroFilter(
+                     min_cutoff=yaw_config['min_cutoff'], 
+                     beta=yaw_config['beta'],
+                     d_cutoff=yaw_config['d_cutoff']
+                 )
+             yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
+             yaw = math.radians(yaw_deg) # Update radian value for later calculation
+             
+             # Pitch Filtering
+             pitch_config = settings.FILTER_CONFIG['HAND']['PITCH']
+             if 'pitch' not in one_euro_filter_dict:
+                 one_euro_filter_dict['pitch'] = OneEuroFilter(
+                     min_cutoff=pitch_config['min_cutoff'], 
+                     beta=pitch_config['beta'],
+                     d_cutoff=pitch_config['d_cutoff']
+                 )
+             pitch_deg = one_euro_filter_dict['pitch'].filter(pitch_deg, timestamp)
+             pitch = math.radians(pitch_deg) # Update radian value
+             
+        # 3. Calculate Grip Factor
         ref_len_grip = np.linalg.norm(p9 - p0)
         grip_factor = 0.0
         
@@ -323,7 +388,7 @@ class HandTracker:
             tips_indices = [8, 12, 16, 20]
             tips_dist_sum = 0.0
             for idx in tips_indices:
-                pt = get_pt_unified(landmarks[idx])
+                pt = get_pt_unified(idx) # Using filtered landmarks
                 tips_dist_sum += np.linalg.norm(pt - p0)
             
             avg_tips_dist = tips_dist_sum / 4.0
@@ -335,13 +400,14 @@ class HandTracker:
             grip_factor = (r_open - ratio) / (r_open - r_closed)
             grip_factor = max(0.0, min(grip_factor, 1.0))
             
+            # Smooth grip factor
             if grip_state is not None:
-                alpha = settings.HAND_GRIP_SMOOTHING_ALPHA
+                alpha = settings.FILTER_CONFIG['HAND']['DEPTH']['grip_smoothing_alpha']
                 last_grip = grip_state.get('value', 0.0)
                 grip_factor = alpha * grip_factor + (1.0 - alpha) * last_grip
                 grip_state['value'] = grip_factor
 
-        # 3D Position Estimation
+        # 4. 3D Position Estimation
         if camera_matrix is None:
              focal_length = (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
         else:
@@ -350,10 +416,22 @@ class HandTracker:
         REF_LENGTH_UP_M = settings.HAND_REF_LENGTH_M
         REF_LENGTH_ACROSS_M = settings.HAND_REF_WIDTH_M
         
-        pitch = math.asin(np.clip(-normal[1], -1.0, 1.0))
-        pitch_deg = math.degrees(pitch)
-        
         dist_up_2d = np.linalg.norm(p9[:2] - p0[:2])
+        dist_across_2d = np.linalg.norm(p17[:2] - p5[:2])
+        
+        # --- Level 2 Filter: Pixel Distances ---
+        if one_euro_filter_dict is not None and timestamp is not None:
+            dist_config = settings.FILTER_CONFIG['HAND']['PIXEL_DIST']
+            
+            if 'dist_up' not in one_euro_filter_dict:
+                one_euro_filter_dict['dist_up'] = OneEuroFilter(
+                    min_cutoff=dist_config['min_cutoff'], beta=dist_config['beta'], d_cutoff=dist_config['d_cutoff'])
+            dist_up_2d = one_euro_filter_dict['dist_up'].filter(dist_up_2d, timestamp)
+            
+            if 'dist_across' not in one_euro_filter_dict:
+                one_euro_filter_dict['dist_across'] = OneEuroFilter(
+                    min_cutoff=dist_config['min_cutoff'], beta=dist_config['beta'], d_cutoff=dist_config['d_cutoff'])
+            dist_across_2d = one_euro_filter_dict['dist_across'].filter(dist_across_2d, timestamp)
         
         if dist_up_2d < 1e-4:
             z_up_raw = 0.5
@@ -362,7 +440,6 @@ class HandTracker:
             len_px_up = dist_up_2d * frame_width
             z_up_raw = (focal_length * REF_LENGTH_UP_M * cos_pitch) / len_px_up
 
-        dist_across_2d = np.linalg.norm(p17[:2] - p5[:2])
         
         if dist_across_2d < 1e-4:
             z_across = 0.5
@@ -371,7 +448,10 @@ class HandTracker:
             len_px_across = dist_across_2d * frame_width
             z_across = (focal_length * REF_LENGTH_ACROSS_M * cos_yaw) / len_px_across
             
+        # 5. Apply Corrections
         length_correction_factor = 1.0
+        depth_config = settings.FILTER_CONFIG['HAND']['DEPTH']
+        
         if width_correction_state is not None:
             length_correction_factor = width_correction_state.get('value', 1.0)
             
@@ -380,7 +460,7 @@ class HandTracker:
                  sigma = np.std(depth_length_history)
                  avg = np.mean(depth_length_history)
                  if avg > 1e-6:
-                     temp_motion_score = min(max(sigma / (avg * settings.HAND_DEPTH_SIGMA_THRESHOLD_RATIO), 0.0), 1.0)
+                     temp_motion_score = min(max(sigma / (avg * depth_config['sigma_threshold_ratio']), 0.0), 1.0)
             
             can_update_correction = (temp_motion_score < 0.2) and \
                                     (grip_factor < 0.2) and \
@@ -413,8 +493,66 @@ class HandTracker:
             'len_corr': length_correction_factor
         }
         
-        center_x_norm = (landmarks[0].x + landmarks[9].x) / 2.0
-        center_y_norm = (landmarks[0].y + landmarks[9].y) / 2.0
+        # --- Level 3: High-Level Data Filtering (Depth) ---
+        
+        motion_score = 0.0
+        if depth_length_history is not None:
+            depth_length_history.append(z_up)
+            if len(depth_length_history) > depth_config['history_size']:
+                depth_length_history.pop(0)
+            
+            if len(depth_length_history) >= 2:
+                sigma_length = np.std(depth_length_history)
+                avg_depth = np.mean(depth_length_history)
+                sigma_threshold = avg_depth * depth_config['sigma_threshold_ratio']
+                if sigma_threshold < 1e-6: sigma_threshold = 1e-6
+                motion_score = min(max(sigma_length / sigma_threshold, 0.0), 1.0)
+
+        # Depth Anchoring
+        anchor_weight = 0.0
+        anchor_depth = 0.0
+        
+        if anchor_state is not None:
+            can_update_anchor = (abs(yaw_deg) < depth_config['anchor_yaw_threshold']) and \
+                                (grip_factor < depth_config['anchor_grip_threshold'])
+                                
+            if can_update_anchor:
+                anchor_state['value'] = z_est
+                anchor_state['frame_id'] = frame_id
+                anchor_state['timestamp'] = timestamp if timestamp else time.time()
+                
+            if anchor_state['value'] > 0 and grip_factor > 0:
+                frames_since_update = frame_id - anchor_state['frame_id']
+                if frames_since_update < 0: frames_since_update = 0
+                
+                half_life = depth_config['anchor_halflife_frames']
+                decay = math.exp(-frames_since_update * 0.693 / half_life)
+                
+                motion_factor = 1.0 - motion_score
+                w_anchor = decay * motion_factor * grip_factor
+                w_anchor = min(w_anchor, 0.8) 
+                
+                anchor_weight = w_anchor
+                anchor_depth = anchor_state['value']
+                
+                z_est = (1.0 - w_anchor) * z_est + w_anchor * anchor_depth
+                
+        # --- Explicit Z Filtering (Pre-XY Calculation) ---
+        # 确保 Z 值稳定后再计算 XY
+        if one_euro_filter_dict is not None and timestamp is not None:
+            z_config = settings.FILTER_CONFIG['HAND']['Z_VAL']
+            if 'z_val' not in one_euro_filter_dict:
+                one_euro_filter_dict['z_val'] = OneEuroFilter(
+                    min_cutoff=z_config['min_cutoff'], beta=z_config['beta'], d_cutoff=z_config['d_cutoff'])
+            z_est = one_euro_filter_dict['z_val'].filter(z_est, timestamp)
+
+        # Center Calculation (using filtered landmarks implicitly)
+        # Note: landmarks[0] and landmarks[9] in original code were raw. 
+        # Now we should use filtered ones for consistency.
+        lm0 = get_filtered_lm(0)
+        lm9 = get_filtered_lm(9)
+        center_x_norm = (lm0.x + lm9.x) / 2.0
+        center_y_norm = (lm0.y + lm9.y) / 2.0
         
         center_x_px = center_x_norm * frame_width
         center_y_px = center_y_norm * frame_height
@@ -428,60 +566,12 @@ class HandTracker:
         x_est = (center_x_px - cx) * z_est / focal_length
         y_est = (center_y_px - cy) * z_est / focal_length
         
-        motion_score = 0.0
-        if depth_length_history is not None:
-            depth_length_history.append(z_up)
-            if len(depth_length_history) > settings.HAND_DEPTH_HISTORY_SIZE:
-                depth_length_history.pop(0)
-            
-            if len(depth_length_history) >= 2:
-                sigma_length = np.std(depth_length_history)
-                avg_depth = np.mean(depth_length_history)
-                sigma_threshold = avg_depth * settings.HAND_DEPTH_SIGMA_THRESHOLD_RATIO
-                if sigma_threshold < 1e-6: sigma_threshold = 1e-6
-                motion_score = min(max(sigma_length / sigma_threshold, 0.0), 1.0)
-
-        r_base = settings.HAND_KALMAN_R_BASE
-        r_grip_max = settings.HAND_KALMAN_R_GRIP_MAX
+        # Dynamic Kalman Noise
+        r_base = settings.FILTER_CONFIG['HAND']['POSITION']['measurement_noise'] # Using Config R
+        r_grip_max = settings.FILTER_CONFIG['HAND']['POSITION']['r_grip_max']
         r_dynamic = r_base + grip_factor * r_grip_max * (1.0 - motion_score)
 
-        anchor_weight = 0.0
-        anchor_depth = 0.0
-        
-        if anchor_state is not None:
-            can_update_anchor = (abs(yaw_deg) < settings.HAND_DEPTH_ANCHOR_YAW_THRESHOLD) and \
-                                (grip_factor < settings.HAND_DEPTH_ANCHOR_GRIP_THRESHOLD)
-                                
-            if can_update_anchor:
-                anchor_state['value'] = z_est
-                anchor_state['frame_id'] = frame_id
-                anchor_state['timestamp'] = timestamp if timestamp else time.time()
-                
-            if anchor_state['value'] > 0 and grip_factor > 0:
-                frames_since_update = frame_id - anchor_state['frame_id']
-                if frames_since_update < 0: frames_since_update = 0
-                
-                half_life = settings.HAND_DEPTH_ANCHOR_HALFLIFE_FRAMES
-                decay = math.exp(-frames_since_update * 0.693 / half_life)
-                
-                motion_factor = 1.0 - motion_score
-                w_anchor = decay * motion_factor * grip_factor
-                w_anchor = min(w_anchor, 0.8) 
-                
-                anchor_weight = w_anchor
-                anchor_depth = anchor_state['value']
-                
-                z_est = (1.0 - w_anchor) * z_est + w_anchor * anchor_depth
-
-        if one_euro_filter_dict is not None and timestamp is not None:
-            if 'yaw' not in one_euro_filter_dict:
-                one_euro_filter_dict['yaw'] = OneEuroFilter(
-                    min_cutoff=settings.HAND_YAW_ONE_EURO_MIN_CUTOFF, 
-                    beta=settings.HAND_YAW_ONE_EURO_BETA,
-                    d_cutoff=settings.HAND_YAW_ONE_EURO_D_CUTOFF
-                )
-            yaw_deg = one_euro_filter_dict['yaw'].filter(yaw_deg, timestamp)
-            
+        # Kalman for Position
         if pos_filter:
             x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est, R_z=r_dynamic)
             

@@ -17,12 +17,17 @@ class EyeTracker:
         # 记录 Yaw 以便可视化
         self.current_yaw = 0.0
         
+        # 滤波器配置
+        face_config = settings.FILTER_CONFIG['FACE']
+        dist_config = face_config['DISTANCE']
+        offset_config = face_config['OFFSET']
+
         # 初始化距离平滑卡尔曼滤波器（二级层）
-        self.pixel_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
-        self.real_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
+        self.pixel_dist_filter = OneDKalmanFilter(Q=dist_config['process_noise'], R=dist_config['measurement_noise'])
+        self.real_dist_filter = OneDKalmanFilter(Q=dist_config['process_noise'], R=dist_config['measurement_noise'])
         # 偏移量滤波器（二级层）
-        self.offset_x_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
-        self.offset_y_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
+        self.offset_x_filter = OneDKalmanFilter(Q=offset_config['process_noise'], R=offset_config['measurement_noise'])
+        self.offset_y_filter = OneDKalmanFilter(Q=offset_config['process_noise'], R=offset_config['measurement_noise'])
         
         # 记录头部中心位置用于绘制
         self.head_center_pos = None
@@ -38,10 +43,18 @@ class EyeTracker:
         self.current_yaw = 0.0
         # 保持当前距离值直到计算出新值以避免闪烁
 
-    def _get_filter(self, name, value, current_time, min_cutoff=settings.FACE_DIST_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_DIST_ONE_EURO_BETA, d_cutoff=settings.FACE_DIST_ONE_EURO_D_CUTOFF):
+    def _get_filter(self, name, value, current_time, min_cutoff=None, beta=None, d_cutoff=None):
         # 优化：使用 current_time 参数，避免重复调用 time.time()
         # 优化：减少字典查找开销
         f = self.filters.get(name)
+        
+        # 如果未指定参数，使用默认的关键点滤波配置
+        if min_cutoff is None:
+            kp_config = settings.FILTER_CONFIG['KEYPOINT']
+            min_cutoff = kp_config['min_cutoff']
+            beta = kp_config['beta']
+            d_cutoff = kp_config['d_cutoff']
+            
         if f is None:
             f = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
             self.filters[name] = f
@@ -110,8 +123,15 @@ class EyeTracker:
             iris_r = self._extract_landmark_point(face_landmarks, 473, w, h)
             
             if iris_l and iris_r:
-                f_iris_l = (self._get_filter('iris_lx', iris_l[0], current_time), self._get_filter('iris_ly', iris_l[1], current_time))
-                f_iris_r = (self._get_filter('iris_rx', iris_r[0], current_time), self._get_filter('iris_ry', iris_r[1], current_time))
+                iris_config = settings.FILTER_CONFIG['FACE']['IRIS']
+                f_iris_l = (
+                    self._get_filter('iris_lx', iris_l[0], current_time, min_cutoff=iris_config['min_cutoff'], beta=iris_config['beta'], d_cutoff=iris_config['d_cutoff']), 
+                    self._get_filter('iris_ly', iris_l[1], current_time, min_cutoff=iris_config['min_cutoff'], beta=iris_config['beta'], d_cutoff=iris_config['d_cutoff'])
+                )
+                f_iris_r = (
+                    self._get_filter('iris_rx', iris_r[0], current_time, min_cutoff=iris_config['min_cutoff'], beta=iris_config['beta'], d_cutoff=iris_config['d_cutoff']), 
+                    self._get_filter('iris_ry', iris_r[1], current_time, min_cutoff=iris_config['min_cutoff'], beta=iris_config['beta'], d_cutoff=iris_config['d_cutoff'])
+                )
         
         # Inner Eye Corners (133, 362)
         inner_l = self._extract_landmark_point(face_landmarks, 133, w, h)
@@ -201,11 +221,12 @@ class EyeTracker:
         #     yaw = yaw_geo
 
         # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
+        yaw_config = settings.FILTER_CONFIG['FACE']['YAW']
         yaw = self._get_filter(
             'head_yaw', yaw, current_time,
-            min_cutoff=settings.FACE_YAW_ONE_EURO_MIN_CUTOFF, 
-            beta=settings.FACE_YAW_ONE_EURO_BETA,
-            d_cutoff=settings.FACE_YAW_ONE_EURO_D_CUTOFF
+            min_cutoff=yaw_config['min_cutoff'], 
+            beta=yaw_config['beta'],
+            d_cutoff=yaw_config['d_cutoff']
         )
 
         # 4. Apply correction and filtering
@@ -269,18 +290,12 @@ class EyeTracker:
             
             # --- 应用 OneEuroFilter ---
             # 使用唯一键名，例如 "lm_1_x", "lm_1_y"
-            # 使用 Head Pose 专用的滤波参数 (通常需要更平滑)
+            # 使用默认 Keypoint 参数
             filtered_x = self._get_filter(
-                f'lm_{idx}_x', pt[0], current_time,
-                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
-                beta=settings.FACE_POS_ONE_EURO_BETA,
-                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
+                f'lm_{idx}_x', pt[0], current_time
             )
             filtered_y = self._get_filter(
-                f'lm_{idx}_y', pt[1], current_time,
-                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
-                beta=settings.FACE_POS_ONE_EURO_BETA,
-                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
+                f'lm_{idx}_y', pt[1], current_time
             )
             
             image_points[i] = [filtered_x, filtered_y]
