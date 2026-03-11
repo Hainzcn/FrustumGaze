@@ -10,53 +10,113 @@ VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计
 EYE_TRACKING_INTERVAL = 1
 HAND_TRACKING_INTERVAL = 1 # 手部追踪频率 (每多少帧进行一次手部检测)
 POSE_TRACKING_INTERVAL = 6 # 姿态追踪频率 (每多少帧进行一次姿态检测)
-EYE_GAZE_CALCULATION_INTERVAL = 2 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
-GAZE_RENDER_INTERVAL = 2 # 视线线段渲染频率 (每多少帧更新一次)
+EYE_GAZE_CALCULATION_INTERVAL = 3 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
+GAZE_RENDER_INTERVAL = 3 # 视线线段渲染频率 (每多少帧更新一次)
 FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
 
-# 滤波器参数设置
+# 滤波器参数配置 (Hierarchical Filter Configuration)
+FILTER_CONFIG = {
+    # Level 1: 关键点滤波 (Shared Keypoint Filtering)
+    # 用于平滑 MediaPipe 原始输出坐标 (Normalized x, y, z)
+    'KEYPOINT': {
+        'min_cutoff': 1.0,  # 默认截止频率 (Hz) - 较高值减少延迟
+        'beta': 0.5,        # 速度系数 - 较高值在快速运动时减少延迟
+        'd_cutoff': 1.0     # 导数截止频率 (Hz)
+    },
 
-# 手部距离一元滤波参数
-HAND_DIST_ONE_EURO_MIN_CUTOFF = 0.5
-HAND_DIST_ONE_EURO_BETA = 0.2
-HAND_DIST_ONE_EURO_D_CUTOFF = 1.0
+    # Level 2 & 3: 高级数据滤波 (High-Level Data Filtering)
+    'HAND': {
+        # 3D 空间位置 (Kalman Filter)
+        'POSITION': {
+            'process_noise': 0.01,     # Q: 过程噪声 (信任模型)
+            'measurement_noise': 0.1,  # R: 测量噪声 (信任测量)
+            'r_grip_max': 1.0,         # 握拳时的最大附加测量噪声
+        },
+        # 归一化宽度/尺度 (OneEuro)
+        'SCALE': {
+            'min_cutoff': 0.5,
+            'beta': 0.2,
+            'd_cutoff': 1.0
+        },
+        # Yaw 角度 (OneEuro)
+        'YAW': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # Pitch 角度 (OneEuro)
+        'PITCH': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # 像素距离 (Pixel Distance) (OneEuro)
+        'PIXEL_DIST': {
+            'min_cutoff': 1.0,  # 较高以保持对快速运动的响应
+            'beta': 0.2,        # 适度平滑
+            'd_cutoff': 1.0
+        },
+        # 深度 Z 值 (OneEuro - Pre-XY Calculation)
+        'Z_VAL': {
+            'min_cutoff': 0.5,  # 较低以获得更稳定的 Z
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        },
+        # 深度动态参数
+        'DEPTH': {
+            'history_size': 15,
+            'sigma_threshold_ratio': 0.03,
+            'anchor_yaw_threshold': 15.0,
+            'anchor_grip_threshold': 0.2,
+            'anchor_halflife_frames': 45,
+            'grip_smoothing_alpha': 0.3,
+            'grip_ref_scale': 1.2
+        }
+    },
 
-# Hand OneEuroFilter Parameters (Position/PnP - Landmarks)
-HAND_POS_ONE_EURO_MIN_CUTOFF = 1.0
-HAND_POS_ONE_EURO_BETA = 0.0
-HAND_POS_ONE_EURO_D_CUTOFF = 1.0
-
-# Hand Kalman Filter Parameters (for 3D position smoothing)
-HAND_KALMAN_PROCESS_NOISE = 0.01    # Q: Process noise covariance (trust in model)
-HAND_KALMAN_MEASUREMENT_NOISE = 0.1 # R: Measurement noise covariance (trust in measurement)
-
-# 手部 Yaw 角 OneEuroFilter 参数
-HAND_YAW_ONE_EURO_MIN_CUTOFF = 1.0
-HAND_YAW_ONE_EURO_BETA = 0.0
-HAND_YAW_ONE_EURO_D_CUTOFF = 1.0
-
-# 人脸距离一元滤波参数
-FACE_DIST_ONE_EURO_MIN_CUTOFF = 0.3
-FACE_DIST_ONE_EURO_BETA = 0.3
-FACE_DIST_ONE_EURO_D_CUTOFF = 1.0
-
-# 人脸位置一元滤波参数
-FACE_POS_ONE_EURO_MIN_CUTOFF = 1.0
-FACE_POS_ONE_EURO_BETA = 0.0
-FACE_POS_ONE_EURO_D_CUTOFF = 1.0
-
-# 头部 Yaw 角 OneEuroFilter 参数
-FACE_YAW_ONE_EURO_MIN_CUTOFF = 1.0
-FACE_YAW_ONE_EURO_BETA = 0.0
-FACE_YAW_ONE_EURO_D_CUTOFF = 1.0
-
-# 人脸距离卡尔曼滤波参数
-FACE_DIST_KALMAN_Q = 0.1 # Process Noise (Q)
-FACE_DIST_KALMAN_R = 5.0 # Measurement Noise (R)
-
-# 人脸位置偏移卡尔曼滤波参数
-FACE_OFFSET_KALMAN_Q = 0.3 # Process Noise (Q)
-FACE_OFFSET_KALMAN_R = 0.1 # Measurement Noise (R)
+    'FACE': {
+        # 距离估算 (Kalman Filter)
+        'DISTANCE': {
+            'process_noise': 0.1,  # Q
+            'measurement_noise': 5.0 # R
+        },
+        # 中心偏移量 (Kalman Filter)
+        'OFFSET': {
+            'process_noise': 0.3,  # Q
+            'measurement_noise': 0.1 # R
+        },
+        # Yaw 角度 (OneEuro)
+        'YAW': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # Pitch 角度 (OneEuro)
+        'PITCH': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
+        # 虹膜/眼球中心 (OneEuro - 通常需要更平滑)
+        'IRIS': {
+            'min_cutoff': 0.5,
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        },
+        # 深度 Z 值 (OneEuro)
+        'Z_VAL': {
+            'min_cutoff': 0.5,
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        },
+        # 动态校准参数
+        'CALIBRATION': {
+            'width_correction_alpha': 0.05, # 校准平滑系数
+            'min_valid_yaw': 15.0, # 校准时的最大偏航角
+            'min_valid_pitch': 15.0 # 校准时的最大俯仰角
+        }
+    }
+}
 
 # Network
 UDP_IP = "127.0.0.1"
@@ -69,147 +129,59 @@ LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
 # --- 3D Face Model & Physical Parameters ---
-# 用户可配置的真实面部物理参数 (单位: mm)
+# 用户可配置的真实面部物理参数 (单位: cm)
 # 用于构建 solvePnP 的 3D 模型点
-# 调整这些参数可以提高头部姿态解算的准确性
 
-# 1. 眼部参数
-P_OUTER_EYE_DIST_MM = 90.0   # 双眼外眼角间距 (标准值: ~90mm)
-P_INNER_EYE_DIST_MM = 40.0   # 双眼内眼角间距 (标准值: ~30-35mm) - 用于辅助参考
-
-# 2. 垂直距离参数 (相对于鼻尖)
-P_NOSE_TO_CHIN_MM = 80.0     # 鼻尖到下巴尖的垂直距离
-P_NOSE_TO_EYE_Y_MM = 45.0    # 鼻尖到眼睛中心线的垂直高度
-P_NOSE_TO_MOUTH_Y_MM = 40.0  # 鼻尖到嘴角的垂直距离
-
-# 3. 深度/前后参数 (相对于鼻尖，鼻尖 Z=0，面部其他部分 Z<0)
-P_EYE_Z_OFFSET_MM = 25.0     # 眼睛所在的深度平面 (后缩)
-P_MOUTH_Z_OFFSET_MM = 25.0   # 嘴角所在的深度平面
-P_CHIN_Z_OFFSET_MM = 30.0    # 下巴尖所在的深度平面
-
-# 4. 口部宽度
-P_MOUTH_WIDTH_MM = 50.0      # 嘴角间距
-
-# --- 3D Hand Model & Physical Parameters ---
-# 用户可配置的真实手部物理参数 (单位: mm)
-# 用于构建 solvePnP 的 3D 手部模型点
-# 坐标系定义: 以手腕(Wrist)为原点
-# 默认右手模型: 手心朝向相机，手指向上
-# X轴: 水平向右 (拇指方向)
-# Y轴: 垂直向上 (手指方向)
-# Z轴: 垂直手掌向外 (指向相机)
-
-# 手腕到各指根关节(MCP)的距离估计
-# Index (食指), Middle (中指), Ring (无名指), Pinky (小指)
-
-# 垂直高度 (Y轴)
-P_WRIST_TO_INDEX_MCP_Y_MM = 95.0
-P_WRIST_TO_MIDDLE_MCP_Y_MM = 95.0
-P_WRIST_TO_RING_MCP_Y_MM = 90.0
-P_WRIST_TO_PINKY_MCP_Y_MM = 80.0
-
-# 水平偏移 (X轴) - 相对于手腕中心
-# 假设右手手心朝前: 小指在左(-), 食指/拇指在右(+)
-P_WRIST_TO_INDEX_MCP_X_MM = 15.0
-P_WRIST_TO_MIDDLE_MCP_X_MM = -5.0
-P_WRIST_TO_RING_MCP_X_MM = -25.0
-P_WRIST_TO_PINKY_MCP_X_MM = -45.0
-
-# 深度偏移 (Z轴) - 假设 MCP 关节稍微前倾或在一个平面
-P_HAND_MCP_Z_OFFSET_MM = 0.0
+# Face Constants
+FACE_REF_LENGTH_CM = 8.0  # 眉心到鼻尖的垂直距离 (参考值)
+FACE_REF_WIDTH_CM = 9.0   # 双眼外眼角间距 (参考值)
+FACE_REF_MOUTH_WIDTH_CM = 5.0 # 嘴角间距 (参考值)
+FACE_REF_MOUTH_DOWN_CM = 4.0 # 鼻尖到嘴角的垂直距离 (参考值)
 
 # --- Derived Model Points (Do Not Edit Directly) ---
-# 构建 3D 坐标系: 
-# Origin (0,0,0) at Nose Tip
-# X+ Right (User's left), Y+ Up, Z+ Forward (out of face)
-# 之前的单位是 arbitrary units (approx 50 units/cm -> scale 5.0)
-# 现在我们统一使用 mm 作为单位，或者保持之前的比例
-# OpenCV solvePnP 的单位只要和相机内参一致即可 (通常相机内参基于像素，tvec 结果基于模型单位)
-# 为了兼容现有逻辑 (tvec 结果单位)，我们使用 scale factor 将 mm 转换为之前的 "Model Units"
-# 之前的 scale: Outer Eye Dist ~450 units / 9cm = 50 units/cm = 5 units/mm
-MODEL_SCALE = 5.0 
+# 3D Coordinate System (Unit: cm):
+# Origin: Nose Tip (0,0,0)
+# X+: User's Left
+# Y+: Up
+# Z+: Forward (out of face)
 
-# 计算模型点坐标
-_x_eye_outer = (P_OUTER_EYE_DIST_MM / 2.0) * MODEL_SCALE
-_y_eye = P_NOSE_TO_EYE_Y_MM * MODEL_SCALE
-_z_eye = -P_EYE_Z_OFFSET_MM * MODEL_SCALE
+# Eye Centers in Model Space (cm)
+# Used for Gaze Calculation relative to Head Center/Nose
+# X axis: + is Left, - is Right
+# Y axis: + is Up
+# Z axis: + is Forward
 
-_x_mouth = (P_MOUTH_WIDTH_MM / 2.0) * MODEL_SCALE
-_y_mouth = -P_NOSE_TO_MOUTH_Y_MM * MODEL_SCALE
-_z_mouth = -P_MOUTH_Z_OFFSET_MM * MODEL_SCALE
+# Reference dimensions
+eye_y = FACE_REF_LENGTH_CM * 0.6
+eye_x = FACE_REF_WIDTH_CM / 2.0
+eye_z = -2.5
 
-_y_chin = -P_NOSE_TO_CHIN_MM * MODEL_SCALE
-_z_chin = -P_CHIN_Z_OFFSET_MM * MODEL_SCALE
+eye_center_x_offset = 1.5
+eye_center_z_offset = 1.2
 
-MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),                  # Nose tip
-    (0.0, _y_chin, _z_chin),          # Chin
-    (-_x_eye_outer, _y_eye, _z_eye),  # Left eye outer (Model X is negative for Left eye if X+ is Right)
-    (_x_eye_outer, _y_eye, _z_eye),   # Right eye outer
-    (-_x_mouth, _y_mouth, _z_mouth),  # Left mouth corner
-    (_x_mouth, _y_mouth, _z_mouth)    # Right mouth corner
-], dtype="double")
+_x_eye_center = eye_x - eye_center_x_offset
+_z_eye_center = eye_z - eye_center_z_offset
 
-# --- Derived Hand Model Points ---
-# 1. 缩放: 将 mm 转换为 Model Units
-_hand_idx_x = P_WRIST_TO_INDEX_MCP_X_MM * MODEL_SCALE
-_hand_idx_y = P_WRIST_TO_INDEX_MCP_Y_MM * MODEL_SCALE
+LEFT_EYE_CENTER_MODEL = np.array([_x_eye_center, eye_y, _z_eye_center])
+RIGHT_EYE_CENTER_MODEL = np.array([-_x_eye_center, eye_y, _z_eye_center])
 
-_hand_mid_x = P_WRIST_TO_MIDDLE_MCP_X_MM * MODEL_SCALE
-_hand_mid_y = P_WRIST_TO_MIDDLE_MCP_Y_MM * MODEL_SCALE
+# Eye Ball Radius (1.2cm)
+EYE_RADIUS = 1.2
 
-_hand_ring_x = P_WRIST_TO_RING_MCP_X_MM * MODEL_SCALE
-_hand_ring_y = P_WRIST_TO_RING_MCP_Y_MM * MODEL_SCALE
-
-_hand_pinky_x = P_WRIST_TO_PINKY_MCP_X_MM * MODEL_SCALE
-_hand_pinky_y = P_WRIST_TO_PINKY_MCP_Y_MM * MODEL_SCALE
-
-_hand_mcp_z = P_HAND_MCP_Z_OFFSET_MM * MODEL_SCALE
-
-# 2. 构建 3D 点集 (用于 solvePnP)
-# 对应 MediaPipe Hands 关键点索引:
-# 0: Wrist
-# 5: Index Finger MCP
-# 9: Middle Finger MCP
-# 13: Ring Finger MCP
-# 17: Pinky MCP
-
-HAND_MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),                      # 0: Wrist
-    (_hand_idx_x, _hand_idx_y, _hand_mcp_z),     # 5: Index MCP
-    (_hand_mid_x, _hand_mid_y, _hand_mcp_z),     # 9: Middle MCP
-    (_hand_ring_x, _hand_ring_y, _hand_mcp_z),   # 13: Ring MCP
-    (_hand_pinky_x, _hand_pinky_y, _hand_mcp_z)  # 17: Pinky MCP
-], dtype="double")
-
-# 对应的关键点索引 (用于从检测结果中提取 2D 点)
-HAND_MODEL_INDICES = [0, 5, 9, 13, 17]
-
-# Eye Centers in Model Space
-# 估算眼球中心位置 (比外眼角更靠内，深度更深)
-# 假设眼球中心位于外眼角内侧 ~15mm, 深度再深 ~12mm
-_x_eye_center = _x_eye_outer - (15.0 * MODEL_SCALE)
-_z_eye_center = _z_eye - (12.0 * MODEL_SCALE)
-
-LEFT_EYE_CENTER_MODEL = np.array([-_x_eye_center, _y_eye, _z_eye_center])
-RIGHT_EYE_CENTER_MODEL = np.array([_x_eye_center, _y_eye, _z_eye_center])
-
-# Eye Ball Radius (12mm)
-EYE_RADIUS = 12.0 * MODEL_SCALE
-
-# Screen Projection
-AXIS_LENGTH = 100.0 * MODEL_SCALE # 10cm line
+# Screen Projection Axis Length (10cm)
+AXIS_LENGTH = 10.0
 
 # --- Physical Constants (Unit: cm / meters as specified) ---
 
 # Eye Distance Constants (cm)
 # Used for depth estimation based on eye corner distances
 # Sync with PnP parameters for consistency
-INNER_EYE_DIST_CM = P_INNER_EYE_DIST_MM / 10.0
-OUTER_EYE_DIST_CM = P_OUTER_EYE_DIST_MM / 10.0
+INNER_EYE_DIST_CM = 4.0 # Keep as fallback
+OUTER_EYE_DIST_CM = FACE_REF_WIDTH_CM
 
 # Hand Constants
-HAND_PALM_WIDTH_CM = 6.0  # Default palm width (distance between index and pinky MCP)
+HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.
+HAND_REF_WIDTH_M = 0.06 # Reference width (Index MCP to Pinky MCP) for depth estimation. 6cm.
 PINCH_THRESHOLD_M = 0.02  # 2cm threshold for pinch detection
 
 # --- Tracking Confidence Thresholds ---

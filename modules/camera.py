@@ -94,38 +94,42 @@ class ConfigManager:
 
 # --- 视频流获取优化 (Producer) ---
 class WebcamVideoStream:
+    """
+    视频流捕获类。
+    负责从摄像头读取帧，支持多线程读取以提高性能，
+    并支持写入共享内存以供多进程使用。
+    """
     def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_arrays=None):
         self.src = src
         self.width = width
         self.height = height
         self.api_preference = api_preference
         self.exposure = exposure
-        self.shm_arrays = shm_arrays # list of shared memory arrays
+        self.shm_arrays = shm_arrays # 共享内存数组列表
         
         # 初始化摄像头
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
         
         # 优化配置
-        # 1. 强制 MJPEG 压缩
+        # 1. 强制 MJPEG 压缩 (提高帧率)
         self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         # 2. 设置分辨率
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         # 3. 设置 FPS
         self.stream.set(cv2.CAP_PROP_FPS, 30)
-        # 4. 减少 OpenCV 内部缓冲区
+        # 4. 减少 OpenCV 内部缓冲区 (降低延迟)
         self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # 5. 关闭自动曝光、白平衡、增益
+        # 5. 关闭自动曝光、白平衡、增益 (提高稳定性)
         try:
-            self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) # 0.25 通常对应 'Manual' 模式 (具体取决于后端)
+            self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) # 0.25 通常对应 'Manual' 模式
             self.stream.set(cv2.CAP_PROP_EXPOSURE, self.exposure) 
             self.stream.set(cv2.CAP_PROP_AUTO_WB, 0)
             self.stream.set(cv2.CAP_PROP_WB_TEMPERATURE, 4600)
             self.stream.set(cv2.CAP_PROP_GAIN, 32) 
-            print(f"尝试设置曝光为 {self.exposure} (手动模式)...")
         except Exception as e:
-            print(f"设置摄像头手动参数失败: {e}")
+            print(f"WebcamVideoStream: 设置摄像头手动参数失败: {e}")
         
         # 检查是否成功打开
         if not self.stream.isOpened():
@@ -140,12 +144,12 @@ class WebcamVideoStream:
             print("WebcamVideoStream: 无法读取第一帧")
             self.stopped = True
 
-        # 使用 Queue 替代简单的变量 (Thread-safe)
-        # maxsize 限制队列长度，防止堆积
+        # 使用队列进行线程间通信
         self.frame_queue = queue.Queue(maxsize=queue_size)
         self.frame_id = 0
 
     def start(self):
+        """启动视频读取线程"""
         if self.stopped:
             return self
         print("启动视频流读取线程...")
@@ -157,17 +161,16 @@ class WebcamVideoStream:
     def set_shared_memory(self, shm_arrays):
         """延迟设置共享内存 (支持双缓冲列表)"""
         if isinstance(shm_arrays, list):
-             self.shm_arrays = shm_arrays
+            self.shm_arrays = shm_arrays
         else:
-             # 兼容单个 array 的情况 (虽然不建议)
-             self.shm_arrays = [shm_arrays]
+            self.shm_arrays = [shm_arrays]
 
     def update(self):
+        """后台线程持续读取帧"""
         while True:
             if self.stopped:
                 return
             
-            # 读取下一帧
             grabbed, frame = self.stream.read()
             
             if not grabbed:
@@ -175,9 +178,6 @@ class WebcamVideoStream:
                 return
 
             self.frame_id += 1
-            
-            # 防止溢出，定期重置
-            # 10亿帧约等于385天@30fps，重置对取模逻辑影响微乎其微
             if self.frame_id > 1000000000:
                 self.frame_id = 0
             
@@ -189,16 +189,12 @@ class WebcamVideoStream:
                     buffer_idx = self.frame_id % len(self.shm_arrays)
                     target_shm = self.shm_arrays[buffer_idx]
                     
-                    # 确保尺寸匹配
                     if frame.shape == target_shm.shape:
                         np.copyto(target_shm, frame)
-                    else:
-                        # 尺寸不匹配时，进行 resize 或 裁剪
-                        pass 
-                except Exception as e:
+                except Exception:
                     pass
 
-            # 尝试放入队列，如果满了则移除旧的（非阻塞尝试）
+            # 尝试放入队列 (非阻塞)
             if self.frame_queue.full():
                 try:
                     self.frame_queue.get_nowait()
@@ -206,16 +202,16 @@ class WebcamVideoStream:
                     pass
             
             try:
-                # 如果使用共享内存，队列中只放 (None, frame_id, buffer_idx) 以减少拷贝
+                # 如果使用共享内存，队列中只放元数据以减少拷贝
                 if self.shm_arrays is not None:
                     self.frame_queue.put((None, self.frame_id, buffer_idx), block=False)
                 else:
                     self.frame_queue.put((frame, self.frame_id, -1), block=False)
             except queue.Full:
-                pass # Should not happen if we just removed one, but safe guard
+                pass
 
     def read(self):
-        # 非阻塞获取最新帧
+        """获取最新帧"""
         try:
             return True, self.frame_queue.get_nowait()
         except queue.Empty:
@@ -225,6 +221,7 @@ class WebcamVideoStream:
         return self.stream.get(propId)
 
     def stop(self):
+        """停止读取并释放资源"""
         self.stopped = True
         if hasattr(self, 't'):
             self.t.join()
@@ -232,18 +229,44 @@ class WebcamVideoStream:
 
 # 摄像头选择逻辑
 def select_camera_device(config_manager):
+    """
+    选择摄像头设备。
+    优化逻辑：
+    1. 优先尝试使用上次保存的配置直接打开，避免全扫描导致的变焦声和延迟。
+    2. 仅在首次运行或手动选择时进行全扫描。
+    """
+    last_index = config_manager.get_last_camera()
+    
+    # 策略 1: 如果有上次使用的记录，直接尝试打开
+    if last_index is not None:
+        print(f"尝试打开上次使用的摄像头 (索引 {last_index})...")
+        # 尝试快速检测该摄像头是否存在
+        temp_cap = cv2.VideoCapture(last_index, cv2.CAP_DSHOW)
+        if not temp_cap.isOpened():
+             temp_cap = cv2.VideoCapture(last_index, cv2.CAP_ANY)
+             
+        if temp_cap.isOpened():
+            temp_cap.release()
+            print(f"成功检测到摄像头 {last_index}，直接使用。")
+            
+            # 获取已保存的 FOV
+            saved_info = config_manager.get_camera_info(last_index)
+            default_fov = saved_info['fov'] if saved_info else 60.0
+            return last_index, default_fov
+        else:
+            print(f"无法打开上次使用的摄像头 {last_index}，回退到扫描模式。")
+    
+    # 策略 2: 全扫描模式 (仅在无记录或打开失败时执行)
     print("正在扫描摄像头设备...")
     available_indices = []
-    # 扫描常用索引 0-4
     for i in range(5):
-        # 尝试快速打开检测 (优先 DSHOW)
+        # 优先使用 DSHOW (Windows) 速度更快
         temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
         if not temp_cap.isOpened():
             temp_cap = cv2.VideoCapture(i, cv2.CAP_ANY)
         
         if temp_cap.isOpened():
             available_indices.append(i)
-            # 自动存入/更新配置文件
             config_manager.update_camera(i)
             temp_cap.release()
     
@@ -251,152 +274,102 @@ def select_camera_device(config_manager):
         print("错误：未检测到摄像头设备。")
         return None, 60.0
         
-    selected_index = None
-    
-    # 尝试自动加载上次使用的摄像头
-    last_index = config_manager.get_last_camera()
-    
-    # 优先检查 last_index (直接启动逻辑)
-    if last_index is not None and last_index in available_indices:
-        print(f"配置文件指定上次使用的摄像头 (索引 {last_index})，直接启动...")
-        selected_index = last_index
-    elif len(available_indices) == 1:
-        print(f"检测到单个摄像头 (索引 {available_indices[0]})，自动连接。")
+    # 如果只有一个设备，直接使用
+    if len(available_indices) == 1:
         selected_index = available_indices[0]
+        print(f"检测到单个摄像头 (索引 {selected_index})，自动连接。")
     else:
+        # 多个设备，让用户选择
         print("检测到多个摄像头设备：")
         for idx in available_indices:
             info = config_manager.get_camera_info(idx)
-            fov_display = ""
-            name_display = ""
-            if info:
-                fov_display = f" (FOV: {info['fov']}°)"
-                name_display = f" [{info['name']}]"
-                
-            marker = " *" if idx == last_index else ""
-            print(f" - 设备索引: {idx}{name_display}{fov_display}{marker}")
+            fov_str = f" (FOV: {info['fov']}°)" if info else ""
+            name_str = f" [{info['name']}]" if info else ""
+            print(f" - 设备索引: {idx}{name_str}{fov_str}")
             
         while True:
             try:
-                prompt = f"请输入要使用的摄像头索引 {available_indices}"
-                if last_index is not None and last_index in available_indices:
-                    prompt += f" [默认 {last_index}]"
-                prompt += ": "
-                
-                selection = input(prompt).strip()
-                
-                if not selection and last_index is not None and last_index in available_indices:
-                    selected_index = last_index
-                    break
-                
-                idx = int(selection)
+                sel = input(f"请输入摄像头索引 {available_indices}: ").strip()
+                if not sel and last_index in available_indices: # 允许回车默认
+                     selected_index = last_index
+                     break
+                idx = int(sel)
                 if idx in available_indices:
                     selected_index = idx
                     break
-                else:
-                    print("输入的索引无效，请重新输入。")
+                print("无效的索引。")
             except ValueError:
-                print("输入格式错误，请输入数字索引。")
+                print("请输入数字。")
     
     # 保存选择
     config_manager.set_last_camera(selected_index)
     
-    # 获取FOV参数
+    # FOV 配置逻辑
     saved_info = config_manager.get_camera_info(selected_index)
     default_fov = saved_info['fov'] if saved_info else 60.0
     
-    # 检查是否已有用户配置
     if saved_info and saved_info.get("user_configured", False):
-        print(f"检测到已保存的配置参数：FOV {default_fov}° (跳过输入)")
+        print(f"使用已保存配置：FOV {default_fov}°")
         return selected_index, default_fov
     
     while True:
         try:
-            fov_input = input(f"请输入摄像头FOV(视场角) [默认{default_fov}]: ").strip()
-            if not fov_input:
-                fov_val = default_fov
-            else:
-                fov_val = float(fov_input)
-            
+            val = input(f"请输入摄像头FOV [默认{default_fov}]: ").strip()
+            fov_val = float(val) if val else default_fov
             if 0 < fov_val < 180:
-                # 用户确认输入后，更新配置文件并标记为已配置
                 config_manager.update_camera(selected_index, fov=fov_val, user_configured=True)
-                print(f"已保存配置：索引 {selected_index}, FOV {fov_val}°")
                 return selected_index, fov_val
-            else:
-                print("FOV必须在0到180之间。")
+            print("FOV 必须在 0-180 之间。")
         except ValueError:
-            print("输入格式错误，请输入数字。")
-    
-    return selected_index, fov_val
+            print("请输入数字。")
 
 def select_resolution(cap, camera_index, config_manager):
-    # 1. 检查是否有保存的分辨率配置
+    """
+    选择分辨率。
+    优化逻辑：优先使用配置文件中的分辨率，避免重新扫描导致的变焦和延迟。
+    """
+    # 1. 优先读取配置
     saved_info = config_manager.get_camera_info(camera_index)
     if saved_info and "resolution" in saved_info:
-        res = saved_info["resolution"]
-        print(f"检测到已保存的分辨率配置: {res[0]}x{res[1]}")
-        return res[0], res[1]
+        w, h = saved_info["resolution"]
+        print(f"使用已保存的分辨率配置: {w}x{h}")
+        return w, h
 
-    # 2. 如果没有保存配置，扫描支持的分辨率
-    print("正在扫描摄像头支持的分辨率...")
-    target_resolutions = [
-        (1920, 1080), # 1080p
-        (1280, 720),  # 720p
-        (800, 600),   # SVGA
-        (640, 480)    # VGA
-    ]
+    # 2. 扫描支持的分辨率 (仅在首次配置时执行)
+    print("正在扫描摄像头支持的分辨率（可能会有机械变焦声）...")
+    candidates = [(1920, 1080), (1280, 720), (800, 600), (640, 480)]
+    available = []
     
-    available_resolutions = []
-    
-    # 保存当前的设置以便恢复（可选，这里主要是为了测试）
     current_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     current_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    for w, h in target_resolutions:
+    for w, h in candidates:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        
-        aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # 只有当实际分辨率与请求的一致时才认为是完美支持
-        if aw == w and ah == h:
-            available_resolutions.append((w, h))
-        else:
-            # 如果不完全匹配，但之前没有添加过这个实际分辨率，也可以添加
-            # 但为了用户体验，只列出精准匹配的，除非一个都匹配不上
-            pass
+        if int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) == w and int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == h:
+            available.append((w, h))
             
-    # 如果没有扫描到精准匹配的，就回退到默认
-    if not available_resolutions:
-        print("未能检测到标准分辨率，将使用默认分辨率。")
+    # 恢复默认分辨率以免影响后续
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, current_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, current_h)
+
+    if not available:
+        print("未能检测到标准分辨率，将使用默认值。")
         return int(current_w), int(current_h)
         
-    print("请选择要使用的分辨率：")
-    for i, (w, h) in enumerate(available_resolutions):
+    print("请选择分辨率：")
+    for i, (w, h) in enumerate(available):
         print(f" {i}: {w}x{h}")
         
-    selected_res = None
     while True:
         try:
-            choice = input(f"请输入分辨率编号 [0-{len(available_resolutions)-1}]: ").strip()
-            if not choice:
-                # 默认选第一个（通常是最高的）
-                selected_res = available_resolutions[0]
-                break
-            
-            idx = int(choice)
-            if 0 <= idx < len(available_resolutions):
-                selected_res = available_resolutions[idx]
-                break
-            else:
-                print("无效的编号。")
+            sel = input(f"请输入编号 [0-{len(available)-1}]: ").strip()
+            idx = int(sel) if sel else 0
+            if 0 <= idx < len(available):
+                res = available[idx]
+                config_manager.update_camera(camera_index, resolution=res)
+                return res
+            print("无效编号。")
         except ValueError:
             print("请输入数字。")
-            
-    # 保存选择
-    print(f"已选择分辨率: {selected_res[0]}x{selected_res[1]}，并保存到配置。")
-    config_manager.update_camera(camera_index, resolution=selected_res)
-    
-    return selected_res[0], selected_res[1]
+

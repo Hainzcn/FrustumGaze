@@ -29,8 +29,8 @@ class GlobalImagePreprocessor:
         :param image: 输入图像
         :param normalized_roi: (x_min, y_min, x_max, y_max) 0-1 范围
         :return: (cropped_image, roi_info)
-                 roi_info: (x, y, w, h) 像素坐标
-                 如果 ROI 无效返回 (None, None)
+                roi_info: (x, y, w, h) 像素坐标
+                如果 ROI 无效返回 (None, None)
         """
         if normalized_roi is None:
             return None, None

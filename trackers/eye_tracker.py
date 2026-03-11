@@ -1,436 +1,233 @@
-
 import cv2
 import time
 import math
 import numpy as np
 from utils.math_utils import OneEuroFilter, OneDKalmanFilter
-from config.settings import MODEL_POINTS
 import config.settings as settings
 
+"""
+眼部与头部追踪计算模块。
+主要职责：
+- 从 MediaPipe 人脸关键点提取虹膜、眼角等兴趣点。
+- 使用几何法估算头部的偏航（Yaw）与俯仰（Pitch）角度。
+- 基于双通道策略（宽度与长度）估算头部到相机的深度，并融合得到稳健的距离。
+- 基于针孔相机模型计算头部中心相对于相机光轴的物理偏移（X/Y）。
+"""
+
 class EyeTracker:
+    """
+    眼部追踪器类，负责计算头部的 3D 空间位置、姿态以及眼部关键点。
+    包含多级滤波、深度估算和物理坐标转换。
+    """
     def __init__(self):
+        # 核心输出状态
         self.current_pixel_dist = 0
         self.current_estimated_dist = 0
         self.current_offset_x = 0
         self.current_offset_y = 0
         
-        # 记录 Yaw 以便可视化
+        # 头部姿态角 (用于可视化与视线修正)
         self.current_yaw = 0.0
+        self.current_pitch = 0.0
         
-        # 初始化距离平滑卡尔曼滤波器（二级层）
-        self.pixel_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
-        self.real_dist_filter = OneDKalmanFilter(Q=settings.FACE_DIST_KALMAN_Q, R=settings.FACE_DIST_KALMAN_R)
-        # 偏移量滤波器（二级层）
-        self.offset_x_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
-        self.offset_y_filter = OneDKalmanFilter(Q=settings.FACE_OFFSET_KALMAN_Q, R=settings.FACE_OFFSET_KALMAN_R)
-        
-        # 记录头部中心位置用于绘制
-        self.head_center_pos = None
+        # 二级滤波：对距离和偏移量应用卡尔曼滤波
+        face_config = settings.FILTER_CONFIG['FACE']
+        dist_cfg = face_config['DISTANCE']
+        off_cfg = face_config['OFFSET']
 
-        # 初始化 OneEuroFilter 字典
-        self.filters = {}
+        self.pixel_dist_filter = OneDKalmanFilter(Q=dist_cfg['process_noise'], R=dist_cfg['measurement_noise'])
+        self.real_dist_filter = OneDKalmanFilter(Q=dist_cfg['process_noise'], R=dist_cfg['measurement_noise'])
+        self.offset_x_filter = OneDKalmanFilter(Q=off_cfg['process_noise'], R=off_cfg['measurement_noise'])
+        self.offset_y_filter = OneDKalmanFilter(Q=off_cfg['process_noise'], R=off_cfg['measurement_noise'])
+        
+        # 状态追踪
+        self.head_center_pos = None # 头部中心在帧中的像素位置
+        self.calibrated_width_cm = settings.FACE_REF_WIDTH_CM # 动态校准后的面部参考宽度
+        self.calibration_config = settings.FILTER_CONFIG['FACE']['CALIBRATION']
+        self.current_depth_details = {} # 深度融合的调试细节
+        self.filters = {} # OneEuroFilter 缓存字典
         self.filters_initialized = False
 
     def reset(self):
+        """重置所有滤波器和内部状态"""
         self.head_center_pos = None
         self.filters = {}
         self.filters_initialized = False
         self.current_yaw = 0.0
-        # 保持当前距离值直到计算出新值以避免闪烁
+        self.current_pitch = 0.0
 
-    def _get_filter(self, name, value, current_time, min_cutoff=settings.FACE_DIST_ONE_EURO_MIN_CUTOFF, beta=settings.FACE_DIST_ONE_EURO_BETA, d_cutoff=settings.FACE_DIST_ONE_EURO_D_CUTOFF):
-        # 优化：使用 current_time 参数，避免重复调用 time.time()
-        # 优化：减少字典查找开销
-        f = self.filters.get(name)
-        if f is None:
-            f = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
-            self.filters[name] = f
-        return f.filter(value, current_time)
-
-    def filter_eye_points(self, eye_points):
-        """
-        对原始像素坐标进行滤波
-        eye_points: [(lx, ly), (rx, ry)]
-        """
-        if len(eye_points) < 2:
-            return eye_points
-            
-        lx, ly = eye_points[0]
-        rx, ry = eye_points[1]
-
-        current_time = time.time()
-
-        f_lx = self._get_filter('lx', lx, current_time)
-        f_ly = self._get_filter('ly', ly, current_time)
-        f_rx = self._get_filter('rx', rx, current_time)
-        f_ry = self._get_filter('ry', ry, current_time)
-        
-        self.filters_initialized = True
-        
-        return [(f_lx, f_ly), (f_rx, f_ry)]
-
-    def apply_distance_filter(self, pixel_dist, estimated_dist):
-        """应用Kalman滤波处理距离数据"""
-        # 数据有效性检查
-        if pixel_dist <= 0 or estimated_dist <= 0:
-            return self.current_pixel_dist, self.current_estimated_dist
-            
-        filtered_pixel = self.pixel_dist_filter.update(pixel_dist)
-        filtered_estimated = self.real_dist_filter.update(estimated_dist)
-        
-        return filtered_pixel, filtered_estimated
+    def _get_filter(self, name, value, current_time, min_cutoff=None, beta=None, d_cutoff=None):
+        """获取或创建指定名称的 OneEuroFilter 并应用滤波"""
+        if name not in self.filters:
+            if min_cutoff is None:
+                cfg = settings.FILTER_CONFIG['KEYPOINT']
+                min_cutoff, beta, d_cutoff = cfg['min_cutoff'], cfg['beta'], cfg['d_cutoff']
+            self.filters[name] = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
+        return self.filters[name].filter(value, current_time)
 
     def _extract_landmark_point(self, landmarks, idx, w, h):
-        """Extracts a specific landmark point and converts to pixel coordinates."""
-        # 优化：移除 try-except (假设 MediaPipe 输出结构稳定)
-        # 优化：返回 tuple 而非 np.array，减少内存分配
+        """从 MediaPipe 关键点列表中提取指定索引点的像素坐标"""
         if idx < len(landmarks):
-            point = landmarks[idx]
-            return (point.x * w, point.y * h)
+            p = landmarks[idx]
+            return (p.x * w, p.y * h)
         return None
 
+    def _extract_and_filter_iris(self, landmarks, w, h, timestamp):
+        """提取并滤波虹膜关键点"""
+        iris_l = self._extract_landmark_point(landmarks, 468, w, h)
+        iris_r = self._extract_landmark_point(landmarks, 473, w, h)
+        if not iris_l or not iris_r: return None, None, None, None
+        
+        cfg = settings.FILTER_CONFIG['FACE']['IRIS']
+        f_iris_l = (self._get_filter('iris_lx', iris_l[0], timestamp, **cfg), 
+                    self._get_filter('iris_ly', iris_l[1], timestamp, **cfg))
+        f_iris_r = (self._get_filter('iris_rx', iris_r[0], timestamp, **cfg), 
+                    self._get_filter('iris_ry', iris_r[1], timestamp, **cfg))
+        return iris_l, iris_r, f_iris_l, f_iris_r
+
+    def _calculate_depth(self, landmarks, w, h, timestamp, focal_length, yaw, pitch):
+        """
+        基于双通道策略（面部宽度与眉鼻长度）估算深度。
+        通过面部姿态动态调整各通道权重并进行面部宽度的自动校准。
+        """
+        # 1. 提取并滤波基准点
+        inner_l = self._extract_landmark_point(landmarks, 133, w, h)
+        inner_r = self._extract_landmark_point(landmarks, 362, w, h)
+        outer_l = self._extract_landmark_point(landmarks, 33, w, h)
+        outer_r = self._extract_landmark_point(landmarks, 263, w, h)
+        nose_tip = self._extract_landmark_point(landmarks, 1, w, h)
+        brow_center = self._extract_landmark_point(landmarks, 168, w, h)
+
+        if any(p is None for p in [inner_l, inner_r, outer_l, outer_r, nose_tip, brow_center]):
+            return self.current_estimated_dist
+
+        # 滤波处理
+        f_outer_l = (self._get_filter('outer_lx', outer_l[0], timestamp), self._get_filter('outer_ly', outer_l[1], timestamp))
+        f_outer_r = (self._get_filter('outer_rx', outer_r[0], timestamp), self._get_filter('outer_ry', outer_r[1], timestamp))
+        f_nose = (self._get_filter('nose_tip_x', nose_tip[0], timestamp), self._get_filter('nose_tip_y', nose_tip[1], timestamp))
+        f_brow = (self._get_filter('brow_center_x', brow_center[0], timestamp), self._get_filter('brow_center_y', brow_center[1], timestamp))
+
+        # 2. 几何投影深度计算
+        d_width_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
+        d_length_px = math.sqrt((f_nose[0] - f_brow[0])**2 + (f_nose[1] - f_brow[1])**2)
+        
+        cos_yaw = max(0.2, abs(math.cos(math.radians(yaw))))
+        cos_pitch = max(0.2, abs(math.cos(math.radians(pitch))))
+
+        z_width = (focal_length * self.calibrated_width_cm * cos_yaw) / d_width_px if d_width_px > 0 else 0
+        z_length = (focal_length * settings.FACE_REF_LENGTH_CM * cos_pitch) / d_length_px if d_length_px > 0 else 0
+
+        # 3. 宽度动态校准 (仅在姿态稳定时)
+        if (abs(yaw) < self.calibration_config['min_valid_yaw'] and 
+            abs(pitch) < self.calibration_config['min_valid_pitch'] and z_length > 0):
+            alpha = self.calibration_config['width_correction_alpha']
+            est_width = (z_length * d_width_px) / (focal_length * cos_yaw)
+            self.calibrated_width_cm = (1 - alpha) * self.calibrated_width_cm + alpha * est_width
+
+        # 4. 融合深度
+        w_width, w_length = math.pow(cos_yaw, 4), math.pow(cos_pitch, 4)
+        total_w = w_width + w_length
+        est_dist = (z_width * w_width + z_length * w_length) / total_w if total_w > 0 else self.current_estimated_dist
+
+        self.current_depth_details = {'z_width': z_width, 'z_length': z_length, 
+                                     'w_width': w_width/total_w if total_w>0 else 0, 
+                                     'w_length': w_length/total_w if total_w>0 else 0, 
+                                     'calibrated_width': self.calibrated_width_cm}
+        
+        # 5. 最终深度滤波
+        z_cfg = settings.FILTER_CONFIG['FACE'].get('Z_VAL', settings.FILTER_CONFIG['FACE']['DISTANCE'])
+        return self._get_filter('face_z_val', est_dist, timestamp, **z_cfg)
+
     def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov, cam_matrix, dist_coeffs, should_calc_gaze=True):
-        """
-        Process face landmarks to extract eye points, calculate distance and head pose.
-        Returns a dictionary with results.
-        should_calc_gaze: 如果为 False，则跳过虹膜提取和视线计算，仅更新头部位置
-        """
-        w, h = frame_width, frame_height
-        current_time = time.time() # 优化：一次获取时间戳
+        """综合处理面部关键点，输出位置、姿态及眼部数据"""
+        w, h, ts = frame_width, frame_height, time.time()
+        focal_length = cam_matrix[0, 0] if cam_matrix is not None else (w / 2.0) / math.tan(math.radians(camera_fov) / 2.0)
         
-        # 1. Extract and Filter Points of Interest
-        # Iris (仅在需要计算视线时提取)
-        iris_l = None
-        iris_r = None
-        f_iris_l = None
-        f_iris_r = None
-        
+        # 1. 虹膜处理
+        eye_pts, raw_eye_pts = [], []
         if should_calc_gaze:
-            iris_l = self._extract_landmark_point(face_landmarks, 468, w, h)
-            iris_r = self._extract_landmark_point(face_landmarks, 473, w, h)
-            
-            if iris_l and iris_r:
-                f_iris_l = (self._get_filter('iris_lx', iris_l[0], current_time), self._get_filter('iris_ly', iris_l[1], current_time))
-                f_iris_r = (self._get_filter('iris_rx', iris_r[0], current_time), self._get_filter('iris_ry', iris_r[1], current_time))
-        
-        # Inner Eye Corners (133, 362)
-        inner_l = self._extract_landmark_point(face_landmarks, 133, w, h)
-        inner_r = self._extract_landmark_point(face_landmarks, 362, w, h)
-        
-        # Outer Eye Corners (33, 263)
-        outer_l = self._extract_landmark_point(face_landmarks, 33, w, h)
-        outer_r = self._extract_landmark_point(face_landmarks, 263, w, h)
-        
-        # 必须检测到眼角才能计算头部位置
-        if any(p is None for p in [inner_l, inner_r, outer_l, outer_r]):
-            return None
+            iris_l, iris_r, f_iris_l, f_iris_r = self._extract_and_filter_iris(face_landmarks, w, h, ts)
+            if f_iris_l and f_iris_r:
+                eye_pts, raw_eye_pts = [f_iris_l, f_iris_r], [iris_l, iris_r]
 
-        # Apply OneEuro Filter to all points
-        # Using specific keys for each coordinate
-        f_inner_l = (self._get_filter('inner_lx', inner_l[0], current_time), self._get_filter('inner_ly', inner_l[1], current_time))
-        f_inner_r = (self._get_filter('inner_rx', inner_r[0], current_time), self._get_filter('inner_ry', inner_r[1], current_time))
-        
-        f_outer_l = (self._get_filter('outer_lx', outer_l[0], current_time), self._get_filter('outer_ly', outer_l[1], current_time))
-        f_outer_r = (self._get_filter('outer_rx', outer_r[0], current_time), self._get_filter('outer_ry', outer_r[1], current_time))
-        
-        # Format for return and legacy support
-        eye_points = []
-        raw_eye_points = []
-        
-        if should_calc_gaze and f_iris_l and f_iris_r:
-            eye_points = [f_iris_l, f_iris_r]
-            raw_eye_points = [iris_l, iris_r]
+        # 2. 姿态角计算
+        pitch, yaw = self._calculate_face_normal_pose(face_landmarks, w, h)
+        y_cfg = settings.FILTER_CONFIG['FACE']['YAW']
+        p_cfg = settings.FILTER_CONFIG['FACE'].get('PITCH', y_cfg)
+        self.current_yaw = self._get_filter('head_yaw', yaw, ts, **y_cfg)
+        self.current_pitch = self._get_filter('head_pitch', pitch, ts, **p_cfg)
+
+        # 3. 深度估算
+        self.current_estimated_dist = self._calculate_depth(face_landmarks, w, h, ts, focal_length, self.current_yaw, self.current_pitch)
+        self.current_pixel_dist = (focal_length * self.calibrated_width_cm) / self.current_estimated_dist if self.current_estimated_dist > 0 else 0
+
+        # 4. 中心追踪点确定
+        center_p = self._extract_landmark_point(face_landmarks, 168, w, h) # 眉心点
+        if center_p:
+            track_p = (self._get_filter('head_center_x', center_p[0], ts), self._get_filter('head_center_y', center_p[1], ts))
         else:
-            # 如果不计算视线，这里返回空列表，避免下游代码错误使用
-            eye_points = [] 
-            raw_eye_points = []
+            # 回退方案：使用右眼内角与外角中点
+            il, ir = self._extract_landmark_point(face_landmarks, 133, w, h), self._extract_landmark_point(face_landmarks, 362, w, h)
+            track_p = ((il[0]+ir[0])/2.0, (il[1]+ir[1])/2.0) if il and ir else None
 
-        # 2. Calculate Distance (using filtered inner/outer eye corners)
-        # 优化：避免创建不必要的 np.array，直接计算欧几里得距离
-        d_inner_px = math.sqrt((f_inner_l[0] - f_inner_r[0])**2 + (f_inner_l[1] - f_inner_r[1])**2)
-        d_outer_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
-        
-        # Real distances (cm)
-        D_INNER_REAL = settings.INNER_EYE_DIST_CM
-        D_OUTER_REAL = settings.OUTER_EYE_DIST_CM
-        
-        # Focal length calculation (优化：计算一次，传递给 update_offset)
-        fov_rad = math.radians(camera_fov)
-        focal_length = (w / 2.0) / math.tan(fov_rad / 2.0)
-        
-        # Estimate depth
-        z_inner = (D_INNER_REAL * focal_length) / d_inner_px if d_inner_px > 0 else 0
-        z_outer = (D_OUTER_REAL * focal_length) / d_outer_px if d_outer_px > 0 else 0
-        
-        if z_inner > 0 and z_outer > 0:
-            estimated_dist = (z_inner + z_outer) / 2.0
-        elif z_inner > 0:
-            estimated_dist = z_inner
-        else:
-            estimated_dist = z_outer
-            
-        # Representative pixel distance (for filtering compatibility)
-        # 优化：使用内眼角间距作为像素标尺，而非依赖固定的瞳距假设
-        pixel_dist = d_inner_px
-
-        # 3. Calculate Head Pose (PnP)
-        # Using raw points for PnP as it usually benefits from raw data, 
-        # but we could use filtered points if we filtered all mesh points (too expensive).
-        # We'll use the specific PnP logic here.
-        # 优化：传递 current_time
-        pitch, yaw, roll, rvec, tvec, rmat = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, current_time)
-        
-        # # [Modified] 使用 MediaPipe 空间位置参数推算用户头部偏航角
-        # # 替换 PnP 解算所得 yaw 角
-        # if 33 < len(face_landmarks) and 263 < len(face_landmarks):
-        #     # 提取左眼角(33)和右眼角(263)
-        #     lm_l = face_landmarks[33]
-        #     lm_r = face_landmarks[263]
-            
-        #     # MediaPipe Z 坐标与 X 坐标尺度一致 (Normalized)
-        #     # 计算向量差
-        #     dx = lm_r.x - lm_l.x
-        #     dz = lm_r.z - lm_l.z
-            
-        #     # 计算 Yaw 角 (degrees)
-        #     # 当右眼(263) Z 坐标大于左眼(33)时 (dz > 0)，表示右眼更远，即向右转 (Yaw > 0)
-        #     # 注意：atan2(y, x) -> atan2(dz, dx)
-        #     yaw_geo = math.degrees(math.atan2(dz, dx))
-            
-        #     # 替换 Yaw
-        #     yaw = yaw_geo
-
-        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
-        yaw = self._get_filter(
-            'head_yaw', yaw, current_time,
-            min_cutoff=settings.FACE_YAW_ONE_EURO_MIN_CUTOFF, 
-            beta=settings.FACE_YAW_ONE_EURO_BETA,
-            d_cutoff=settings.FACE_YAW_ONE_EURO_D_CUTOFF
-        )
-
-        # 4. Apply correction and filtering
-        correction_factor = math.cos(math.radians(yaw))
-        if correction_factor < 0.2: correction_factor = 0.2
-        
-        corrected_dist = estimated_dist * correction_factor
-        
-        filtered_pixel, filtered_estimated = self.apply_distance_filter(pixel_dist, corrected_dist)
-        self.current_pixel_dist = filtered_pixel
-        self.current_estimated_dist = filtered_estimated
-        
-        # 5. Update offset
-        # 优化：传递已计算的 focal_length，避免重复计算
-        # 计算头部中心位置 (双眼中心/鼻梁)，而非使用右眼
-        # MediaPipe Landmark 168: Point between eyes
-        center_168 = self._extract_landmark_point(face_landmarks, 168, w, h)
-        
-        if center_168:
-            # 应用 OneEuroFilter 滤波
-            f_center_x = self._get_filter('head_center_x', center_168[0], current_time)
-            f_center_y = self._get_filter('head_center_y', center_168[1], current_time)
-            tracking_point = (f_center_x, f_center_y)
-        else:
-            # 回退方案：如果没有 168，使用之前计算的眼部中点
-            stable_rx = (f_inner_r[0] + f_outer_r[0]) / 2.0
-            stable_ry = (f_inner_r[1] + f_outer_r[1]) / 2.0
-            tracking_point = (stable_rx, stable_ry)
-
-        self.update_offset(tracking_point, w, h, filtered_pixel, filtered_estimated, focal_length=focal_length)
-        
-        # 记录 Yaw 以便可视化
-        self.current_yaw = yaw
+        # 5. 更新物理偏移
+        if track_p:
+            self.update_offset(track_p, w, h, self.current_pixel_dist, self.current_estimated_dist, focal_length=focal_length)
         
         return {
-            'eye_points': eye_points,
-            'raw_eye_points': raw_eye_points,
-            'rvec': rvec,
-            'tvec': tvec,
-            'yaw': yaw,
-            'pitch': pitch,
-            'roll': roll,
-            'rmat': rmat
+            'eye_points': eye_pts, 'raw_eye_points': raw_eye_pts,
+            'yaw': self.current_yaw, 'pitch': self.current_pitch, 'roll': 0.0,
+            'calibrated_width': self.calibrated_width_cm
         }
 
-    def _calculate_head_pose(self, face_landmarks, w, h, cam_matrix, dist_coeffs, current_time):
-        """Calculates head pose using PnP and verifies with Reprojection Error."""
-        # 2D 图像点 (使用 MediaPipe 关键点索引)
-        # 1: Nose Tip, 152: Chin, 33: Left Eye Outer, 263: Right Eye Outer, 
-        # 61: Left Mouth Corner, 291: Right Mouth Corner
-        # 仅保留最必要的 6 个点以提升性能
-        indices = [1, 152, 33, 263, 61, 291]
-        
-        # 优化：预分配 numpy 数组，避免循环 append
-        image_points = np.empty((len(indices), 2), dtype=np.float64)
-        
-        for i, idx in enumerate(indices):
-            pt = self._extract_landmark_point(face_landmarks, idx, w, h)
-            if pt is None:
-                return 0, 0, 0, None, None, None
-            
-            # --- 应用 OneEuroFilter ---
-            # 使用唯一键名，例如 "lm_1_x", "lm_1_y"
-            # 使用 Head Pose 专用的滤波参数 (通常需要更平滑)
-            filtered_x = self._get_filter(
-                f'lm_{idx}_x', pt[0], current_time,
-                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
-                beta=settings.FACE_POS_ONE_EURO_BETA,
-                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
-            )
-            filtered_y = self._get_filter(
-                f'lm_{idx}_y', pt[1], current_time,
-                min_cutoff=settings.FACE_POS_ONE_EURO_MIN_CUTOFF, 
-                beta=settings.FACE_POS_ONE_EURO_BETA,
-                d_cutoff=settings.FACE_POS_ONE_EURO_D_CUTOFF
-            )
-            
-            image_points[i] = [filtered_x, filtered_y]
-            
-        # PnP 求解
-        (success, rotation_vector, translation_vector) = cv2.solvePnP(MODEL_POINTS, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_EPNP)
-    
-        if not success:
-            return 0, 0, 0, None, None, None
+    def _calculate_face_normal_pose(self, face_landmarks, w, h):
+        """使用面部特征点几何关系估算姿态角"""
+        def get_vec(idx):
+            p = face_landmarks[idx]
+            return np.array([p.x * w, p.y * h, p.z * w])
 
-        # --- 验证逻辑: 计算重投影误差 (已移除以节省性能) ---
-        # projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
-        # error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
+        # 使用外眼角、下巴、眉心构造坐标系
+        lx, rx, chin, glab = get_vec(33), get_vec(263), get_vec(152), get_vec(168)
+        normal = np.cross(rx - lx, chin - glab)
+        mag = np.linalg.norm(normal)
+        if mag == 0: return 0.0, 0.0
         
-        # 计算欧拉角
-        # 优化：返回 rmat 供复用
-        rmat, jac = cv2.Rodrigues(rotation_vector)
-        angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
-        
-        # angles[0]=pitch, angles[1]=yaw, angles[2]=roll
-        return angles[0], angles[1], angles[2], rotation_vector, translation_vector, rmat
+        normal /= mag
+        pitch = math.degrees(math.atan2(normal[1], normal[2])) + 30.0 # 经验偏置修正
+        yaw = math.degrees(math.atan2(normal[0], normal[2]))
+        return pitch, yaw
 
-    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=60.0, rmat=None):
-        """
-        计算单眼视线向量
-        :param iris_center_2d: (x, y) 像素坐标
-        :param eye_center_model_3d: (x, y, z) 模型坐标系下的眼球中心
-        :param rvec: 头部旋转向量
-        :param tvec: 头部平移向量
-        :param cam_matrix: 相机内参
-        :param rmat: 可选，预计算的旋转矩阵
-        :return: (gaze_vector_3d, eye_center_cam_3d) 相机坐标系下的视线向量和眼球中心
-        """
-        # 1. 将眼球中心变换到相机坐标系
-        # 优化：复用 rmat
-        if rmat is None:
-            rmat, _ = cv2.Rodrigues(rvec)
-            
-        eye_center_cam = np.dot(rmat, eye_center_model_3d) + tvec.reshape(3)
+    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, tvec, cam_matrix, dist_coeffs, eye_radius=60.0, rmat=None):
+        """计算单眼的 3D 视线向量 (近似模型)"""
+        p_iris = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
+        ray = np.dot(np.linalg.inv(cam_matrix), p_iris)
+        ray /= np.linalg.norm(ray)
         
-        # 2. 将虹膜 2D 点反投影为射线 (相机坐标系)
-        # 先去畸变？为简单起见假设畸变很小或直接使用原始坐标
-        # 射线方向: inv(K) * [u, v, 1]
-        p_iris_h = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
-        ray_dir = np.dot(np.linalg.inv(cam_matrix), p_iris_h)
-        ray_dir = ray_dir / np.linalg.norm(ray_dir) # Normalize
+        z = self.current_estimated_dist
+        iris_cam = ray * (z / ray[2]) if ray[2] != 0 else ray * z
         
-        # 3. 计算射线与眼球球面的交点 (或者近似)
-        # 球体：圆心 = eye_center_cam，半径 = 60 (12mm * 50 units/cm)
-        radius = eye_radius
+        T = np.array([self.current_offset_x, self.current_offset_y, self.current_estimated_dist])
+        eye_center_cam = np.dot(rmat, eye_center_model_3d) + T
         
-        # 射线: O = (0,0,0), D = ray_dir
-        # 交点: |t*D - C|^2 = r^2
-        # t^2 - 2(C.D)t + |C|^2 - r^2 = 0
-        C = eye_center_cam
-        a = 1.0
-        b = -2.0 * np.dot(C, ray_dir)
-        c_val = np.dot(C, C) - radius**2
-        
-        discriminant = b**2 - 4*a*c_val
-        
-        if discriminant >= 0:
-            # 射线与球体相交
-            t1 = (-b - math.sqrt(discriminant)) / (2*a)
-            t2 = (-b + math.sqrt(discriminant)) / (2*a)
-            t = min(t1, t2) if t1 > 0 and t2 > 0 else max(t1, t2) # Should be positive
-            
-            if t > 0:
-                iris_on_sphere = t * ray_dir
-                gaze_vector = iris_on_sphere - eye_center_cam
-                return gaze_vector, eye_center_cam
-                
-        # Fallback: 如果没有交点（计算误差），使用射线上的最近点
-        # 射线上距离 C 最近的点在 t = C.D 处
-        t_closest = np.dot(C, ray_dir)
-        closest_point = t_closest * ray_dir
-        # 强制长度为半径
-        vec = closest_point - eye_center_cam
-        vec_norm = np.linalg.norm(vec)
-        if vec_norm > 0:
-            gaze_vector = vec / vec_norm * radius
-        else:
-            # 回退到头部前方方向 (相机空间中的头部 Z 轴)
-            # 相机空间中的头部 Z 轴是 R 的第 3 列
-            gaze_vector = rmat[:, 2] * radius
-            
-        return gaze_vector, eye_center_cam
-
+        gaze = iris_cam - eye_center_cam
+        return gaze / np.linalg.norm(gaze), eye_center_cam
 
     def update_offset(self, tracking_point, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0, focal_length=None):
-        """
-        计算并更新头部中心（画面中双眼中心）相对于摄像机光轴的物理偏移
-        采用针孔成像模型 (Pinhole Camera Model):
-        X = Z * (x - cx) / fx
-        Y = Z * (y - cy) / fy
+        """计算头部中心相对于相机光轴的物理偏移量 (单位: cm)"""
+        if real_dist_cm <= 0: return
         
-        tracking_point: (u, v) 稳定的头部中心点（MediaPipe 168）
-        """
-        # 如果距离无效，尝试使用缓存
-        if real_dist_cm <= 0:
-            if self.current_estimated_dist > 0:
-                real_dist_cm = self.current_estimated_dist
-            else:
-                return
-
-        if tracking_point is None:
-            return
-            
-        # 1. 确定头部中心坐标 (u, v)
-        # 使用传入的稳定跟踪点
         u, v = tracking_point
         self.head_center_pos = (int(u), int(v))
         
-        # 2. 确定相机内参 (Intrinsics)
-        # 主点 (Principal Point) 坐标 (cx, cy)
-        # 严格定义为图像中心，消除系统性偏差
-        cx = frame_width / 2.0
-        cy = frame_height / 2.0
+        # 针孔相机模型反投影
+        cx, cy = frame_width / 2.0, frame_height / 2.0
+        fx = fy = focal_length if focal_length else (frame_width / 2.0) / math.tan(math.radians(fov) / 2.0)
         
-        # 焦距 (Focal Length) fx, fy
-        # 优化：优先使用传入的 focal_length
-        if focal_length is not None:
-            fx = focal_length
-            fy = focal_length
-        else:
-            # 假设像素是正方形 (square pixels)，即 fx = fy
-            # 使用与 calculate_distance 一致的 FOV = 60度 计算焦距
-            fov_rad = math.radians(fov)
-            # tan(fov/2) = (w/2) / f  =>  f = (w/2) / tan(fov/2)
-            f = (frame_width / 2.0) / math.tan(fov_rad / 2.0)
-            fx = f
-            fy = f
-        
-        # 3. 获取深度 Z (cm)
-        Z = real_dist_cm
-        
-        # 4. 应用针孔模型公式计算物理偏移 (X, Y)
-        # x轴向右为正，y轴向下为正 (符合图像坐标系)
-        # 当 u = cx, v = cy 时，结果严格为 0
-        real_offset_x = Z * (u - cx) / fx
-        real_offset_y = Z * (v - cy) / fy
-        
-        # 滤波 (Keep Secondary Filter)
-        filtered_x = self.offset_x_filter.update(real_offset_x)
-        filtered_y = self.offset_y_filter.update(real_offset_y)
-        
-        # 保留浮点数精度
-        self.current_offset_x = filtered_x
-        self.current_offset_y = filtered_y
+        # 计算并应用卡尔曼滤波
+        self.current_offset_x = self.offset_x_filter.update(real_dist_cm * (u - cx) / fx)
+        self.current_offset_y = self.offset_y_filter.update(real_dist_cm * (v - cy) / fy)
 
     def get_gaze_params(self):
-        """批量获取视线参数，减少属性访问开销"""
+        """获取视线追踪所需的深度与偏移参数"""
         return self.current_estimated_dist, self.current_offset_x, self.current_offset_y
+
