@@ -135,63 +135,35 @@ RIGHT_IRIS = [473, 474, 475, 476, 477]
 # Face Constants
 FACE_REF_LENGTH_CM = 8.0  # 眉心到鼻尖的垂直距离 (参考值)
 FACE_REF_WIDTH_CM = 9.0   # 双眼外眼角间距 (参考值)
+FACE_REF_MOUTH_WIDTH_CM = 5.0 # 嘴角间距 (参考值)
+FACE_REF_MOUTH_DOWN_CM = 4.0 # 鼻尖到嘴角的垂直距离 (参考值)
 
 # --- Derived Model Points (Do Not Edit Directly) ---
-# 构建 3D 坐标系 (Unit: cm): 
-# Origin (0,0,0) at Nose Tip (Landmark 1)
-# X+ Right (User's left), Y+ Up (User's Up), Z+ Forward (out of face)
-# 注意：OpenCV Camera Frame 是 Y Down，Z Forward。
-# 为了保持 PnP 结果的一致性，我们将 Model 建立为 Y Up (符合直觉)，
-# 这样 PnP 得到的 rvec 会包含一个绕 X 轴的翻转 (180度)。
-# 或者，我们可以建立 Y Down 的 Model，这样 rvec 就是 0 附近的微小旋转。
-# 现有的代码似乎假设了 Model Y Up (因为 _y_eye 是正数，且 eyes 在 nose 上方)。
-# 我们保持这个约定。
-
-# 4-Point Model: Nose Tip, Brow Center, Left Eye Outer, Right Eye Outer
-# 坐标单位：cm
-
-# 1. Nose Tip (Landmark 1)
-p_nose = (0.0, 0.0, 0.0)
-
-# 2. Brow Center (Landmark 168)
-# 位于鼻尖上方 FACE_REF_LENGTH_CM
-# 深度：眉骨通常比鼻尖靠后，设为 -2.0 cm
-p_brow = (0.0, FACE_REF_LENGTH_CM, -2.0)
-
-# 3. Eyes (Landmark 33, 263)
-# Y轴高度：通常位于鼻尖和眉心之间。
-# 假设眼睛位于眉心下方 25% 处，或者鼻尖上方 75% 处？
-# 简单起见，设为 FACE_REF_LENGTH_CM * 0.6
-eye_y = FACE_REF_LENGTH_CM * 0.6
-# X轴宽度：FACE_REF_WIDTH_CM / 2
-eye_x = FACE_REF_WIDTH_CM / 2.0
-# 深度：眼球比眉骨更深，设为 -2.5 cm (比鼻尖靠后 2.5cm)
-eye_z = -2.5
-
-p_eye_l = (-eye_x, eye_y, eye_z) # Left Eye (User's Left is Model X Negative?) 
-# Wait, X+ is Right. User's Left is on the Right side of the image (if mirrored) or Left side?
-# Usually Model X+ is User's Left (Stage Right).
-# Let's check previous code: (-_x_eye_outer, _y_eye, _z_eye) was comment "Left eye outer".
-# So X negative is Left Eye.
-p_eye_r = (eye_x, eye_y, eye_z)  # Right Eye
-
-MODEL_POINTS = np.array([
-    p_nose,   # 1
-    p_brow,   # 168
-    p_eye_l,  # 33
-    p_eye_r   # 263
-], dtype="double")
+# 3D Coordinate System (Unit: cm):
+# Origin: Nose Tip (0,0,0)
+# X+: User's Left
+# Y+: Up
+# Z+: Forward (out of face)
 
 # Eye Centers in Model Space (cm)
-# 眼球中心比外眼角更靠内 (~1.5cm)，更深 (~1.2cm)
+# Used for Gaze Calculation relative to Head Center/Nose
+# X axis: + is Left, - is Right
+# Y axis: + is Up
+# Z axis: + is Forward
+
+# Reference dimensions
+eye_y = FACE_REF_LENGTH_CM * 0.6
+eye_x = FACE_REF_WIDTH_CM / 2.0
+eye_z = -2.5
+
 eye_center_x_offset = 1.5
 eye_center_z_offset = 1.2
 
 _x_eye_center = eye_x - eye_center_x_offset
 _z_eye_center = eye_z - eye_center_z_offset
 
-LEFT_EYE_CENTER_MODEL = np.array([-_x_eye_center, eye_y, _z_eye_center])
-RIGHT_EYE_CENTER_MODEL = np.array([_x_eye_center, eye_y, _z_eye_center])
+LEFT_EYE_CENTER_MODEL = np.array([_x_eye_center, eye_y, _z_eye_center])
+RIGHT_EYE_CENTER_MODEL = np.array([-_x_eye_center, eye_y, _z_eye_center])
 
 # Eye Ball Radius (1.2cm)
 EYE_RADIUS = 1.2
