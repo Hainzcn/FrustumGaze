@@ -374,6 +374,7 @@ class FrustumGazePipeline:
                     self.eye_tracker.current_pixel_dist = processed_gaze_data.get('current_pixel_dist', 0)
                     self.eye_tracker.head_center_pos = processed_gaze_data.get('head_center_pos')
                     self.eye_tracker.current_yaw = processed_gaze_data.get('yaw', 0.0)
+                    self.eye_tracker.current_pitch = processed_gaze_data.get('pitch', 0.0)
                     self.eye_tracker.current_depth_details = processed_gaze_data.get('current_depth_details', {})
 
                     self.latest_eye_points = processed_gaze_data.get('eye_points', [])

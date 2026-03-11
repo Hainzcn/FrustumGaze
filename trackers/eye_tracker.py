@@ -14,8 +14,9 @@ class EyeTracker:
         self.current_offset_x = 0
         self.current_offset_y = 0
         
-        # 记录 Yaw 以便可视化
+        # 记录 Yaw/Pitch 以便可视化
         self.current_yaw = 0.0
+        self.current_pitch = 0.0
         
         # 滤波器配置
         face_config = settings.FILTER_CONFIG['FACE']
@@ -48,6 +49,7 @@ class EyeTracker:
         self.filters = {}
         self.filters_initialized = False
         self.current_yaw = 0.0
+        self.current_pitch = 0.0
         # 保持当前距离值直到计算出新值以避免闪烁
 
     def _get_filter(self, name, value, current_time, min_cutoff=None, beta=None, d_cutoff=None):
@@ -280,17 +282,24 @@ class EyeTracker:
         if z_length <= 0: w_length = 0
         
         estimated_dist = 0
-        if w_width + w_length > 0:
-            estimated_dist = (w_width * z_width + w_length * z_length) / (w_width + w_length)
+        total_weight = w_width + w_length
+        
+        if total_weight > 0:
+            # 归一化权重，确保和为 1
+            w_width_norm = w_width / total_weight
+            w_length_norm = w_length / total_weight
+            estimated_dist = w_width_norm * z_width + w_length_norm * z_length
         else:
             estimated_dist = self.current_estimated_dist # Fallback
+            w_width_norm = 0
+            w_length_norm = 0
             
         # 记录详细信息用于可视化调试
         self.current_depth_details = {
             'z_width': z_width,
             'z_length': z_length,
-            'w_width': w_width,
-            'w_length': w_length,
+            'w_width': w_width_norm,
+            'w_length': w_length_norm,
             'calibrated_width': self.calibrated_width_cm
         }
             
@@ -334,8 +343,9 @@ class EyeTracker:
 
         self.update_offset(tracking_point, w, h, pixel_dist, estimated_dist, focal_length=focal_length)
         
-        # 记录 Yaw 以便可视化
+        # 记录 Yaw/Pitch 以便可视化
         self.current_yaw = yaw
+        self.current_pitch = pitch
         
         return {
             'eye_points': eye_points,
@@ -350,14 +360,16 @@ class EyeTracker:
         }
 
     def _calculate_head_pose(self, face_landmarks, w, h, cam_matrix, dist_coeffs, current_time):
-        """Calculates head pose using PnP and verifies with Reprojection Error."""
-        # 2D 图像点 (使用 MediaPipe 关键点索引)
-        # 1: Nose Tip, 152: Chin, 33: Left Eye Outer, 263: Right Eye Outer, 
-        # 61: Left Mouth Corner, 291: Right Mouth Corner
-        # 仅保留最必要的 6 个点以提升性能
-        indices = [1, 152, 33, 263, 61, 291]
+        """Calculates head pose using PnP with simplified 4-point model."""
+        # 4-Point Model (defined in settings.py):
+        # 1: Nose Tip (Index 1)
+        # 2: Brow Center (Index 168)
+        # 3: Left Eye Outer (Index 33)
+        # 4: Right Eye Outer (Index 263)
         
-        # 优化：预分配 numpy 数组，避免循环 append
+        indices = [1, 168, 33, 263]
+        
+        # 优化：预分配 numpy 数组
         image_points = np.empty((len(indices), 2), dtype=np.float64)
         
         for i, idx in enumerate(indices):
@@ -366,8 +378,6 @@ class EyeTracker:
                 return 0, 0, 0, None, None, None
             
             # --- 应用 OneEuroFilter ---
-            # 使用唯一键名，例如 "lm_1_x", "lm_1_y"
-            # 使用默认 Keypoint 参数
             filtered_x = self._get_filter(
                 f'lm_{idx}_x', pt[0], current_time
             )
@@ -378,21 +388,36 @@ class EyeTracker:
             image_points[i] = [filtered_x, filtered_y]
             
         # PnP 求解
-        (success, rotation_vector, translation_vector) = cv2.solvePnP(MODEL_POINTS, image_points, cam_matrix, dist_coeffs, flags=cv2.SOLVEPNP_EPNP)
+        # 使用 SOLVEPNP_EPNP 或 SOLVEPNP_ITERATIVE
+        # 注意：EPnP 需要至少 4 个点。DLT 需要至少 6 个点。
+        # 当点数较少时，Iterative 或 P3P (如果是 3 或 4 点) 是更好的选择。
+        # OpenCV 文档指出，对于 4 个点，SOLVEPNP_EPNP 或 SOLVEPNP_ITERATIVE 应该工作。
+        # 但是，如果 SOLVEPNP_ITERATIVE 内部回退到 DLT，就会报错。
+        # SOLVEPNP_P3P (flags=cv2.SOLVEPNP_P3P) 专门用于 4 个点 (3+1)。
+        
+        flags = cv2.SOLVEPNP_ITERATIVE
+        if len(settings.MODEL_POINTS) == 4:
+             flags = cv2.SOLVEPNP_P3P # P3P requires exactly 4 points
+             # 注意：P3P 返回多个解，solvePnP 可能只返回其中一个。
+             # 实际上，SOLVEPNP_EPNP 对于 n >= 4 也是稳定的。
+             flags = cv2.SOLVEPNP_EPNP
+             
+        # 强制使用 EPnP，它对 4 个点也有效且比 DLT 稳定
+        (success, rotation_vector, translation_vector) = cv2.solvePnP(
+            settings.MODEL_POINTS, 
+            image_points, 
+            cam_matrix, 
+            dist_coeffs, 
+            flags=cv2.SOLVEPNP_EPNP
+        )
     
         if not success:
             return 0, 0, 0, None, None, None
-
-        # --- 验证逻辑: 计算重投影误差 (已移除以节省性能) ---
-        # projected_points, _ = cv2.projectPoints(MODEL_POINTS, rotation_vector, translation_vector, cam_matrix, dist_coeffs)
-        # error = cv2.norm(image_points, projected_points.squeeze(), cv2.NORM_L2) / len(image_points)
         
         # 计算欧拉角
-        # 优化：返回 rmat 供复用
         rmat, jac = cv2.Rodrigues(rotation_vector)
         angles, mtxR, mtxQ, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
         
-        # angles[0]=pitch, angles[1]=yaw, angles[2]=roll
         return angles[0], angles[1], angles[2], rotation_vector, translation_vector, rmat
 
     def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, rvec, tvec, cam_matrix, dist_coeffs, eye_radius=60.0, rmat=None):

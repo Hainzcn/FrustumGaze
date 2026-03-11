@@ -129,97 +129,83 @@ LEFT_IRIS = [468, 469, 470, 471, 472]
 RIGHT_IRIS = [473, 474, 475, 476, 477]
 
 # --- 3D Face Model & Physical Parameters ---
-# 用户可配置的真实面部物理参数 (单位: mm)
+# 用户可配置的真实面部物理参数 (单位: cm)
 # 用于构建 solvePnP 的 3D 模型点
-# 调整这些参数可以提高头部姿态解算的准确性
 
-# 1. 眼部参数
-P_OUTER_EYE_DIST_MM = 90.0   # 双眼外眼角间距 (标准值: ~90mm)
-P_INNER_EYE_DIST_MM = 40.0   # 双眼内眼角间距 (标准值: ~30-35mm) - 用于辅助参考
-
-# 2. 垂直距离参数 (相对于鼻尖)
-P_NOSE_TO_CHIN_MM = 80.0     # 鼻尖到下巴尖的垂直距离
-P_NOSE_TO_EYE_Y_MM = 45.0    # 鼻尖到眼睛中心线的垂直高度
-P_NOSE_TO_MOUTH_Y_MM = 40.0  # 鼻尖到嘴角的垂直距离
-
-# 3. 深度/前后参数 (相对于鼻尖，鼻尖 Z=0，面部其他部分 Z<0)
-P_EYE_Z_OFFSET_MM = 25.0     # 眼睛所在的深度平面 (后缩)
-P_MOUTH_Z_OFFSET_MM = 25.0   # 嘴角所在的深度平面
-P_CHIN_Z_OFFSET_MM = 30.0    # 下巴尖所在的深度平面
-
-# 4. 口部宽度
-P_MOUTH_WIDTH_MM = 50.0      # 嘴角间距
-
-# --- 3D Hand Model & Physical Parameters ---
-# 用户可配置的真实手部物理参数 (单位: mm)
-# 用于构建 solvePnP 的 3D 手部模型点
-# 坐标系定义: 以手腕(Wrist)为原点
-# 默认右手模型: 手心朝向相机，手指向上
-# X轴: 水平向右 (拇指方向)
-# Y轴: 垂直向上 (手指方向)
-# Z轴: 垂直手掌向外 (指向相机)
-
-# 深度偏移 (Z轴) - 假设 MCP 关节稍微前倾或在一个平面
-P_HAND_MCP_Z_OFFSET_MM = 0.0
+# Face Constants
+FACE_REF_LENGTH_CM = 8.0  # 眉心到鼻尖的垂直距离 (参考值)
+FACE_REF_WIDTH_CM = 9.0   # 双眼外眼角间距 (参考值)
 
 # --- Derived Model Points (Do Not Edit Directly) ---
-# 构建 3D 坐标系: 
-# Origin (0,0,0) at Nose Tip
-# X+ Right (User's left), Y+ Up, Z+ Forward (out of face)
-# 之前的单位是 arbitrary units (approx 50 units/cm -> scale 5.0)
-# 现在我们统一使用 mm 作为单位，或者保持之前的比例
-# OpenCV solvePnP 的单位只要和相机内参一致即可 (通常相机内参基于像素，tvec 结果基于模型单位)
-# 为了兼容现有逻辑 (tvec 结果单位)，我们使用 scale factor 将 mm 转换为之前的 "Model Units"
-# 之前的 scale: Outer Eye Dist ~450 units / 9cm = 50 units/cm = 5 units/mm
-MODEL_SCALE = 5.0 
+# 构建 3D 坐标系 (Unit: cm): 
+# Origin (0,0,0) at Nose Tip (Landmark 1)
+# X+ Right (User's left), Y+ Up (User's Up), Z+ Forward (out of face)
+# 注意：OpenCV Camera Frame 是 Y Down，Z Forward。
+# 为了保持 PnP 结果的一致性，我们将 Model 建立为 Y Up (符合直觉)，
+# 这样 PnP 得到的 rvec 会包含一个绕 X 轴的翻转 (180度)。
+# 或者，我们可以建立 Y Down 的 Model，这样 rvec 就是 0 附近的微小旋转。
+# 现有的代码似乎假设了 Model Y Up (因为 _y_eye 是正数，且 eyes 在 nose 上方)。
+# 我们保持这个约定。
 
-# 计算模型点坐标
-_x_eye_outer = (P_OUTER_EYE_DIST_MM / 2.0) * MODEL_SCALE
-_y_eye = P_NOSE_TO_EYE_Y_MM * MODEL_SCALE
-_z_eye = -P_EYE_Z_OFFSET_MM * MODEL_SCALE
+# 4-Point Model: Nose Tip, Brow Center, Left Eye Outer, Right Eye Outer
+# 坐标单位：cm
 
-_x_mouth = (P_MOUTH_WIDTH_MM / 2.0) * MODEL_SCALE
-_y_mouth = -P_NOSE_TO_MOUTH_Y_MM * MODEL_SCALE
-_z_mouth = -P_MOUTH_Z_OFFSET_MM * MODEL_SCALE
+# 1. Nose Tip (Landmark 1)
+p_nose = (0.0, 0.0, 0.0)
 
-_y_chin = -P_NOSE_TO_CHIN_MM * MODEL_SCALE
-_z_chin = -P_CHIN_Z_OFFSET_MM * MODEL_SCALE
+# 2. Brow Center (Landmark 168)
+# 位于鼻尖上方 FACE_REF_LENGTH_CM
+# 深度：眉骨通常比鼻尖靠后，设为 -2.0 cm
+p_brow = (0.0, FACE_REF_LENGTH_CM, -2.0)
+
+# 3. Eyes (Landmark 33, 263)
+# Y轴高度：通常位于鼻尖和眉心之间。
+# 假设眼睛位于眉心下方 25% 处，或者鼻尖上方 75% 处？
+# 简单起见，设为 FACE_REF_LENGTH_CM * 0.6
+eye_y = FACE_REF_LENGTH_CM * 0.6
+# X轴宽度：FACE_REF_WIDTH_CM / 2
+eye_x = FACE_REF_WIDTH_CM / 2.0
+# 深度：眼球比眉骨更深，设为 -2.5 cm (比鼻尖靠后 2.5cm)
+eye_z = -2.5
+
+p_eye_l = (-eye_x, eye_y, eye_z) # Left Eye (User's Left is Model X Negative?) 
+# Wait, X+ is Right. User's Left is on the Right side of the image (if mirrored) or Left side?
+# Usually Model X+ is User's Left (Stage Right).
+# Let's check previous code: (-_x_eye_outer, _y_eye, _z_eye) was comment "Left eye outer".
+# So X negative is Left Eye.
+p_eye_r = (eye_x, eye_y, eye_z)  # Right Eye
 
 MODEL_POINTS = np.array([
-    (0.0, 0.0, 0.0),                  # Nose tip
-    (0.0, _y_chin, _z_chin),          # Chin
-    (-_x_eye_outer, _y_eye, _z_eye),  # Left eye outer (Model X is negative for Left eye if X+ is Right)
-    (_x_eye_outer, _y_eye, _z_eye),   # Right eye outer
-    (-_x_mouth, _y_mouth, _z_mouth),  # Left mouth corner
-    (_x_mouth, _y_mouth, _z_mouth)    # Right mouth corner
+    p_nose,   # 1
+    p_brow,   # 168
+    p_eye_l,  # 33
+    p_eye_r   # 263
 ], dtype="double")
 
-# Eye Centers in Model Space
-# 估算眼球中心位置 (比外眼角更靠内，深度更深)
-# 假设眼球中心位于外眼角内侧 ~15mm, 深度再深 ~12mm
-_x_eye_center = _x_eye_outer - (15.0 * MODEL_SCALE)
-_z_eye_center = _z_eye - (12.0 * MODEL_SCALE)
+# Eye Centers in Model Space (cm)
+# 眼球中心比外眼角更靠内 (~1.5cm)，更深 (~1.2cm)
+eye_center_x_offset = 1.5
+eye_center_z_offset = 1.2
 
-LEFT_EYE_CENTER_MODEL = np.array([-_x_eye_center, _y_eye, _z_eye_center])
-RIGHT_EYE_CENTER_MODEL = np.array([_x_eye_center, _y_eye, _z_eye_center])
+_x_eye_center = eye_x - eye_center_x_offset
+_z_eye_center = eye_z - eye_center_z_offset
 
-# Eye Ball Radius (12mm)
-EYE_RADIUS = 12.0 * MODEL_SCALE
+LEFT_EYE_CENTER_MODEL = np.array([-_x_eye_center, eye_y, _z_eye_center])
+RIGHT_EYE_CENTER_MODEL = np.array([_x_eye_center, eye_y, _z_eye_center])
 
-# Screen Projection
-AXIS_LENGTH = 100.0 * MODEL_SCALE # 10cm line
+# Eye Ball Radius (1.2cm)
+EYE_RADIUS = 1.2
+
+# Screen Projection Axis Length (10cm)
+AXIS_LENGTH = 10.0
 
 # --- Physical Constants (Unit: cm / meters as specified) ---
 
 # Eye Distance Constants (cm)
 # Used for depth estimation based on eye corner distances
 # Sync with PnP parameters for consistency
-INNER_EYE_DIST_CM = P_INNER_EYE_DIST_MM / 10.0
-OUTER_EYE_DIST_CM = P_OUTER_EYE_DIST_MM / 10.0
-
-# Face Constants
-FACE_REF_LENGTH_CM = 8.0  # Reference length (Eyebrow Center to Nose Tip) for depth estimation.
-FACE_REF_WIDTH_CM = OUTER_EYE_DIST_CM # Initial reference width (Outer Eye Dist) for depth estimation.
+INNER_EYE_DIST_CM = 4.0 # Keep as fallback
+OUTER_EYE_DIST_CM = FACE_REF_WIDTH_CM
 
 # Hand Constants
 HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.

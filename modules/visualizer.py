@@ -434,10 +434,10 @@ class Visualizer:
                 head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
             cv2.putText(frame, head_text, (10, 50), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
             
-            # 显示 Head Yaw
+            # 显示 Head Yaw & Pitch
             # Tracker 中应该存储了 yaw
-            if hasattr(tracker, 'current_yaw'):
-                yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
+            if hasattr(tracker, 'current_yaw') and hasattr(tracker, 'current_pitch'):
+                yaw_text = f"Head: Yaw {tracker.current_yaw:.1f} | Pitch {tracker.current_pitch:.1f} deg"
                 cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
 
             # 显示双通道深度详情
