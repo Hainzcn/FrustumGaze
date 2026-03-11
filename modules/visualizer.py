@@ -440,11 +440,24 @@ class Visualizer:
                 yaw_text = f"Head Yaw: {tracker.current_yaw:.1f} deg"
                 cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
 
+            # 显示双通道深度详情
+            if hasattr(tracker, 'current_depth_details') and tracker.current_depth_details:
+                details = tracker.current_depth_details
+                z_w = details.get('z_width', 0)
+                z_l = details.get('z_length', 0)
+                w_w = details.get('w_width', 0)
+                w_l = details.get('w_length', 0)
+                c_w = details.get('calibrated_width', 0)
+                
+                # 显示 Z值 (权重)
+                dual_text = f"ZW:{int(z_w)}({w_w:.2f}) ZL:{int(z_l)}({w_l:.2f}) CW:{c_w:.1f}cm"
+                cv2.putText(frame, dual_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, (200, 200, 200), self.FONT_THICKNESS)
+
         # 绘制视线交点信息
         if self.cached_viz_data['text'] is not None:
             gaze_text = self.cached_viz_data['text']
             color = self.cached_viz_data['text_color']
-            cv2.putText(frame, gaze_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
+            cv2.putText(frame, gaze_text, (10, 110), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
 
         # 绘制头部中心标记（黄色圆圈 + 'C'）
         if tracker.head_center_pos is not None:

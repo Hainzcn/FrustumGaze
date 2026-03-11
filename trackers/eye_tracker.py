@@ -32,6 +32,13 @@ class EyeTracker:
         # 记录头部中心位置用于绘制
         self.head_center_pos = None
 
+        # 双通道深度估算初始化
+        self.calibrated_width_cm = settings.FACE_REF_WIDTH_CM
+        self.calibration_config = settings.FILTER_CONFIG['FACE']['CALIBRATION']
+        
+        # 深度调试信息
+        self.current_depth_details = {}
+
         # 初始化 OneEuroFilter 字典
         self.filters = {}
         self.filters_initialized = False
@@ -165,62 +172,44 @@ class EyeTracker:
             eye_points = [] 
             raw_eye_points = []
 
-        # 2. Calculate Distance (using filtered inner/outer eye corners)
-        # 优化：避免创建不必要的 np.array，直接计算欧几里得距离
-        d_inner_px = math.sqrt((f_inner_l[0] - f_inner_r[0])**2 + (f_inner_l[1] - f_inner_r[1])**2)
-        d_outer_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
+        # 2. Calculate Distance (Dual Channel Strategy)
+        # --------------------------------------------------------------------------------
+        # 通道 A: 宽度通道 (基于外眼角间距) - 易受 Yaw 影响，受 Pitch 影响小
+        # 通道 B: 长度通道 (基于眉心到鼻尖) - 易受 Pitch 影响，受 Yaw 影响小
         
-        # Real distances (cm)
-        D_INNER_REAL = settings.INNER_EYE_DIST_CM
-        D_OUTER_REAL = settings.OUTER_EYE_DIST_CM
+        # 获取长度通道关键点
+        # 1: Nose Tip, 168: Glabella (Between Eyes/Eyebrow Center)
+        # 注意：用户指定眉心到鼻尖距离为 8cm (FACE_REF_LENGTH_CM)
+        p_nose_tip = self._extract_landmark_point(face_landmarks, 1, w, h)
+        p_brow_center = self._extract_landmark_point(face_landmarks, 168, w, h)
+
+        # 滤波关键点 (使用 Keypoint 默认参数)
+        f_nose_tip = None
+        f_brow_center = None
         
+        if p_nose_tip and p_brow_center:
+             f_nose_tip = (self._get_filter('nose_tip_x', p_nose_tip[0], current_time), 
+                           self._get_filter('nose_tip_y', p_nose_tip[1], current_time))
+             f_brow_center = (self._get_filter('brow_center_x', p_brow_center[0], current_time), 
+                              self._get_filter('brow_center_y', p_brow_center[1], current_time))
+
+        # 计算像素距离
+        # 宽度 (Outer Eyes)
+        d_width_px = math.sqrt((f_outer_l[0] - f_outer_r[0])**2 + (f_outer_l[1] - f_outer_r[1])**2)
+        
+        # 长度 (Brow to Nose)
+        d_length_px = 0
+        if f_nose_tip and f_brow_center:
+            d_length_px = math.sqrt((f_nose_tip[0] - f_brow_center[0])**2 + (f_nose_tip[1] - f_brow_center[1])**2)
+
         # Focal length calculation (优化：计算一次，传递给 update_offset)
         fov_rad = math.radians(camera_fov)
         focal_length = (w / 2.0) / math.tan(fov_rad / 2.0)
         
-        # Estimate depth
-        z_inner = (D_INNER_REAL * focal_length) / d_inner_px if d_inner_px > 0 else 0
-        z_outer = (D_OUTER_REAL * focal_length) / d_outer_px if d_outer_px > 0 else 0
-        
-        if z_inner > 0 and z_outer > 0:
-            estimated_dist = (z_inner + z_outer) / 2.0
-        elif z_inner > 0:
-            estimated_dist = z_inner
-        else:
-            estimated_dist = z_outer
-            
-        # Representative pixel distance (for filtering compatibility)
-        # 优化：使用内眼角间距作为像素标尺，而非依赖固定的瞳距假设
-        pixel_dist = d_inner_px
-
-        # 3. Calculate Head Pose (PnP)
-        # Using raw points for PnP as it usually benefits from raw data, 
-        # but we could use filtered points if we filtered all mesh points (too expensive).
-        # We'll use the specific PnP logic here.
-        # 优化：传递 current_time
+        # 3. Calculate Head Pose (PnP) First (needed for fusion weights)
         pitch, yaw, roll, rvec, tvec, rmat = self._calculate_head_pose(face_landmarks, w, h, cam_matrix, dist_coeffs, current_time)
         
-        # # [Modified] 使用 MediaPipe 空间位置参数推算用户头部偏航角
-        # # 替换 PnP 解算所得 yaw 角
-        # if 33 < len(face_landmarks) and 263 < len(face_landmarks):
-        #     # 提取左眼角(33)和右眼角(263)
-        #     lm_l = face_landmarks[33]
-        #     lm_r = face_landmarks[263]
-            
-        #     # MediaPipe Z 坐标与 X 坐标尺度一致 (Normalized)
-        #     # 计算向量差
-        #     dx = lm_r.x - lm_l.x
-        #     dz = lm_r.z - lm_l.z
-            
-        #     # 计算 Yaw 角 (degrees)
-        #     # 当右眼(263) Z 坐标大于左眼(33)时 (dz > 0)，表示右眼更远，即向右转 (Yaw > 0)
-        #     # 注意：atan2(y, x) -> atan2(dz, dx)
-        #     yaw_geo = math.degrees(math.atan2(dz, dx))
-            
-        #     # 替换 Yaw
-        #     yaw = yaw_geo
-
-        # --- 应用 OneEuroFilter 滤波 (对 Yaw 角) ---
+        # --- Filter Yaw & Pitch ---
         yaw_config = settings.FILTER_CONFIG['FACE']['YAW']
         yaw = self._get_filter(
             'head_yaw', yaw, current_time,
@@ -228,17 +217,104 @@ class EyeTracker:
             beta=yaw_config['beta'],
             d_cutoff=yaw_config['d_cutoff']
         )
+        
+        pitch_config = settings.FILTER_CONFIG['FACE'].get('PITCH', yaw_config) # Fallback to yaw config if not found
+        pitch = self._get_filter(
+            'head_pitch', pitch, current_time,
+            min_cutoff=pitch_config['min_cutoff'], 
+            beta=pitch_config['beta'],
+            d_cutoff=pitch_config['d_cutoff']
+        )
 
-        # 4. Apply correction and filtering
-        correction_factor = math.cos(math.radians(yaw))
-        if correction_factor < 0.2: correction_factor = 0.2
+        # 4. Dual Channel Depth Estimation & Fusion
+        # --------------------------------------------------------------------------------
         
-        corrected_dist = estimated_dist * correction_factor
+        # 投影修正系数 (Projection Correction)
+        # 当发生旋转时，2D 投影长度缩短，导致深度估算偏大
+        # Width Channel affects by Yaw
+        # Length Channel affects by Pitch
         
-        filtered_pixel, filtered_estimated = self.apply_distance_filter(pixel_dist, corrected_dist)
-        self.current_pixel_dist = filtered_pixel
-        self.current_estimated_dist = filtered_estimated
+        # 防止除零
+        cos_yaw = abs(math.cos(math.radians(yaw)))
+        cos_pitch = abs(math.cos(math.radians(pitch)))
         
+        if cos_yaw < 0.2: cos_yaw = 0.2
+        if cos_pitch < 0.2: cos_pitch = 0.2
+
+        # 初步估算各通道深度 (Assuming frontal, then correcting projection)
+        # Z = (f * Real) / (Pixel / cos(angle)) = (f * Real * cos(angle)) / Pixel
+        
+        z_width = 0
+        if d_width_px > 0:
+            z_width = (focal_length * self.calibrated_width_cm * cos_yaw) / d_width_px
+
+        z_length = 0
+        if d_length_px > 0:
+            z_length = (focal_length * settings.FACE_REF_LENGTH_CM * cos_pitch) / d_length_px
+
+        # --- 动态校准 (Dynamic Calibration) ---
+        # 策略：以长度通道 (8cm) 为基准，校准宽度通道的物理宽度
+        # 条件：姿态端正 (Low Yaw/Pitch)
+        is_stable_pose = (abs(yaw) < self.calibration_config['min_valid_yaw']) and \
+                         (abs(pitch) < self.calibration_config['min_valid_pitch'])
+        
+        if is_stable_pose and z_length > 0 and d_width_px > 0:
+            # 反推当前的"真实"宽度
+            # Real_Width = (Z_length * Pixel_Width) / (f * cos_yaw)
+            # 在 stable pose 下，cos_yaw ~ 1
+            current_estimated_width = (z_length * d_width_px) / (focal_length * cos_yaw)
+            
+            # EMA 更新
+            alpha = self.calibration_config['width_correction_alpha']
+            self.calibrated_width_cm = (1 - alpha) * self.calibrated_width_cm + alpha * current_estimated_width
+
+        # --- 深度融合 (Fusion) ---
+        # 权重取决于角度：角度越大，该通道投影变形越大，权重应越低。
+        # 当面部正对镜头时 (Yaw=0, Pitch=0), cos=1, 权重相等 (各占 0.5)。
+        
+        w_width = cos_yaw
+        w_length = cos_pitch
+        
+        # 如果某个通道无效
+        if z_width <= 0: w_width = 0
+        if z_length <= 0: w_length = 0
+        
+        estimated_dist = 0
+        if w_width + w_length > 0:
+            estimated_dist = (w_width * z_width + w_length * z_length) / (w_width + w_length)
+        else:
+            estimated_dist = self.current_estimated_dist # Fallback
+            
+        # 记录详细信息用于可视化调试
+        self.current_depth_details = {
+            'z_width': z_width,
+            'z_length': z_length,
+            'w_width': w_width,
+            'w_length': w_length,
+            'calibrated_width': self.calibrated_width_cm
+        }
+            
+        # --- Z 值滤波 (Level 3) ---
+        # 在计算 XY 偏移之前，先对 Z 进行滤波，防止 Z 的抖动引起 XY 的抖动
+        z_config = settings.FILTER_CONFIG['FACE'].get('Z_VAL', settings.FILTER_CONFIG['FACE']['DISTANCE'])
+        estimated_dist = self._get_filter(
+            'face_z_val', estimated_dist, current_time,
+            min_cutoff=z_config['min_cutoff'],
+            beta=z_config['beta'],
+            d_cutoff=z_config['d_cutoff']
+        )
+        
+        # 兼容旧接口 (pixel_dist 仅用于显示或调试，这里取加权平均的等效像素值)
+        # Pixel = f * Real / Z
+        pixel_dist = 0
+        if estimated_dist > 0:
+            pixel_dist = (focal_length * self.calibrated_width_cm) / estimated_dist
+
+        # Apply secondary smoothing (Optional, keeping for legacy compatibility if needed, but Z is already filtered)
+        # self.current_pixel_dist = pixel_dist
+        self.current_estimated_dist = estimated_dist
+        self.current_pixel_dist = pixel_dist # Update for display
+
         # 5. Update offset
         # 优化：传递已计算的 focal_length，避免重复计算
         # 计算头部中心位置 (双眼中心/鼻梁)，而非使用右眼
@@ -256,7 +332,7 @@ class EyeTracker:
             stable_ry = (f_inner_r[1] + f_outer_r[1]) / 2.0
             tracking_point = (stable_rx, stable_ry)
 
-        self.update_offset(tracking_point, w, h, filtered_pixel, filtered_estimated, focal_length=focal_length)
+        self.update_offset(tracking_point, w, h, pixel_dist, estimated_dist, focal_length=focal_length)
         
         # 记录 Yaw 以便可视化
         self.current_yaw = yaw
@@ -269,7 +345,8 @@ class EyeTracker:
             'yaw': yaw,
             'pitch': pitch,
             'roll': roll,
-            'rmat': rmat
+            'rmat': rmat,
+            'calibrated_width': self.calibrated_width_cm # Return for debug/display
         }
 
     def _calculate_head_pose(self, face_landmarks, w, h, cam_matrix, dist_coeffs, current_time):

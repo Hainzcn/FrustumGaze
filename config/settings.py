@@ -91,11 +91,29 @@ FILTER_CONFIG = {
             'beta': 0.0,
             'd_cutoff': 1.0
         },
+        # Pitch 角度 (OneEuro)
+        'PITCH': {
+            'min_cutoff': 1.0,
+            'beta': 0.0,
+            'd_cutoff': 1.0
+        },
         # 虹膜/眼球中心 (OneEuro - 通常需要更平滑)
         'IRIS': {
             'min_cutoff': 0.5,
             'beta': 0.1,
             'd_cutoff': 1.0
+        },
+        # 深度 Z 值 (OneEuro)
+        'Z_VAL': {
+            'min_cutoff': 0.5,
+            'beta': 0.1,
+            'd_cutoff': 1.0
+        },
+        # 动态校准参数
+        'CALIBRATION': {
+            'width_correction_alpha': 0.05, # 校准平滑系数
+            'min_valid_yaw': 15.0, # 校准时的最大偏航角
+            'min_valid_pitch': 15.0 # 校准时的最大俯仰角
         }
     }
 }
@@ -198,6 +216,10 @@ AXIS_LENGTH = 100.0 * MODEL_SCALE # 10cm line
 # Sync with PnP parameters for consistency
 INNER_EYE_DIST_CM = P_INNER_EYE_DIST_MM / 10.0
 OUTER_EYE_DIST_CM = P_OUTER_EYE_DIST_MM / 10.0
+
+# Face Constants
+FACE_REF_LENGTH_CM = 8.0  # Reference length (Eyebrow Center to Nose Tip) for depth estimation.
+FACE_REF_WIDTH_CM = OUTER_EYE_DIST_CM # Initial reference width (Outer Eye Dist) for depth estimation.
 
 # Hand Constants
 HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.

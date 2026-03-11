@@ -146,6 +146,7 @@ class FrameProcessorProcess(multiprocessing.Process):
                         processed_gaze_data['gaze_params'] = (est_dist, off_x, off_y)
                         processed_gaze_data['head_center_pos'] = tracker.head_center_pos
                         processed_gaze_data['current_pixel_dist'] = tracker.current_pixel_dist
+                        processed_gaze_data['current_depth_details'] = tracker.current_depth_details
                 else:
                     tracker.reset()
 
