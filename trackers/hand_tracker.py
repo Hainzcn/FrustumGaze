@@ -85,9 +85,9 @@ class HandTracker:
                 min_tracking_confidence=settings.HAND_MIN_TRACKING_CONFIDENCE,
                 running_mode=vision.RunningMode.VIDEO)
             self.detector = vision.HandLandmarker.create_from_options(options)
-            print(f"HandTracker: MediaPipe Initialized. FOV={self.fov}")
+            print(f"HandTracker: MediaPipe 初始化完成。")
         except Exception as e:
-            print(f"HandTracker: Failed to init MediaPipe: {e}")
+            print(f"HandTracker: MediaPipe 初始化失败: {e}")
             raise e
 
     def process(self, mp_image, timestamp_ms):

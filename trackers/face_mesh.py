@@ -33,9 +33,9 @@ class FaceMeshTracker:
                 running_mode=vision.RunningMode.VIDEO)
             
             self.detector = vision.FaceLandmarker.create_from_options(options)
-            print("FaceMeshTracker: MediaPipe Initialized.")
+            print("FaceMeshTracker: MediaPipe 初始化完成。")
         except Exception as e:
-            print(f"FaceMeshTracker: Failed to init MediaPipe: {e}")
+            print(f"FaceMeshTracker: MediaPipe 初始化失败: {e}")
             raise e
 
     def detect(self, mp_image, timestamp_ms):

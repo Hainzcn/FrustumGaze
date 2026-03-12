@@ -40,46 +40,62 @@ class Visualizer:
             (0, 17)                              # 掌根
         ]
 
-    def render(self, frame, roi_info, eye_points, raw_eye_points, tracker, fps, gaze_data=None, hand_result=None, pose_result=None, drop_rate=0.0, p99_latency=0.0, hands_pos=None, closest_hand=None, using_full_scan=False):
+    def render(self, frame, 
+               roi_info=None, 
+               eye_points=None, 
+               raw_eye_points=None, 
+               tracker=None, 
+               fps=0.0, 
+               gaze_data=None,
+               hand_result=None,
+               pose_result=None,
+               drop_rate=0.0,
+               p99_latency=0.0,
+               hands_pos=None,
+               closest_hand=None,
+               using_full_scan=False):
         """
-        统一渲染入口。
-        按顺序执行各模块绘制：ROI、手部/姿态、虹膜、视线及统计信息。
+        渲染可视化内容。
+        统一入口，负责调用各子模块绘制 ROI、手部、姿态、虹膜、视线及统计信息。
+        注意：waitKey 只能在主线程调用一次，返回值包含按键信息。
+        返回: (bool) 是否按下 ESC 退出键
         """
-        # 1. 绘制追踪区域 (ROI)
+        if frame is None:
+            return self.check_exit_key()
+
+        # 1. 绘制 ROI 区域
         self._draw_roi(frame, roi_info, using_full_scan)
 
-        # 2. 绘制手部与肢体姿态
-        if hand_result or pose_result:
-            head_dist_cm = tracker.current_estimated_dist if tracker else 0.0
-            self.draw_hands(frame, hand_result, pose_result, hands_pos, closest_hand, head_dist_cm=head_dist_cm)
+        # 2. 绘制手部和姿态 (包含手臂连接)
+        # 获取头部距离以过滤背景干扰手部
+        head_dist = tracker.current_estimated_dist if tracker else 0.0
+        self.draw_hands(frame, hand_result, pose_result, hands_pos, closest_hand, head_dist_cm=head_dist)
         
-        # 全图扫描模式下不渲染细节点（视线等），直接返回
-        if using_full_scan:
-            cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
-            return cv2.waitKey(1) & 0xFF == 27 
+        # 3. 绘制虹膜中心点
+        if eye_points:
+             self._draw_iris(frame, eye_points, raw_eye_points)
 
-        # 3. 绘制虹膜（瞳孔）中心
-        if eye_points and len(eye_points) == 2:
-            self._draw_iris(frame, eye_points, raw_eye_points)
+        # 4. 更新并绘制视线向量 (需要完整的 gaze_data 和 tracker)
+        if gaze_data and tracker and eye_points:
+            # 确保 gaze_data 包含必要的相机参数
+            if 'cam_matrix' in gaze_data and gaze_data['cam_matrix'] is not None:
+                self._update_gaze_viz_with_tracker(
+                    gaze_data['rvec'], 
+                    gaze_data['tvec'], 
+                    eye_points, 
+                    gaze_data['cam_matrix'], 
+                    gaze_data['dist_coeffs'], 
+                    tracker, 
+                    rmat=gaze_data.get('rmat')
+                )
             
-        # 4. 更新视线可视化缓存 (视解算频率同步更新)
-        if gaze_data:
-            self._update_gaze_viz_with_tracker(
-                gaze_data['rvec'], 
-                gaze_data['tvec'], 
-                eye_points, 
-                gaze_data['cam_matrix'], 
-                gaze_data['dist_coeffs'],
-                tracker,
-                rmat=gaze_data.get('rmat')
-            )
-        
-        # 5. 绘制文字信息叠加层 (Info, Gaze Lines, Crosshair)
-        self._draw_overlay(frame, tracker, fps, drop_rate, p99_latency)
+        # 5. 绘制叠加层信息 (FPS, 丢包率, 头部位置文本等)
+        if tracker:
+             self._draw_overlay(frame, tracker, fps, drop_rate, p99_latency)
 
-        # 6. 最终图像显示
-        cv2.imshow('Face and Eye Detection (MediaPipe)', frame)
-        return cv2.waitKey(1) & 0xFF == 27 # 按下 ESC 返回 True
+        # 6. 显示最终画面
+        cv2.imshow('FrustumGaze', frame)
+        return self.check_exit_key()
 
     def _draw_roi(self, frame, roi_info, using_full_scan):
         """绘制当前追踪的 ROI 区域。"""
@@ -373,3 +389,11 @@ class Visualizer:
             if 0 <= dx < w and 0 <= dy < h:
                 cv2.circle(frame, (dx, dy), 4, (0, 255, 255), -1)
                 cv2.putText(frame, "C", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)
+
+    def check_exit_key(self):
+        """
+        检查是否按下了退出键 (ESC)。
+        注意：cv2.waitKey(1) 会消耗至少 1ms。
+        """
+        key = cv2.waitKey(1) & 0xFF
+        return key == 27 # ESC key

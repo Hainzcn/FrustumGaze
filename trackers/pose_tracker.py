@@ -28,9 +28,9 @@ class PoseTracker:
                 min_tracking_confidence=settings.POSE_MIN_TRACKING_CONFIDENCE,
                 running_mode=vision.RunningMode.VIDEO)
             self.detector = vision.PoseLandmarker.create_from_options(options_pose)
-            print(f"PoseTracker: MediaPipe Initialized.")
+            print(f"PoseTracker: MediaPipe 初始化完成。")
         except Exception as e:
-            print(f"PoseTracker: Failed to init MediaPipe: {e}")
+            print(f"PoseTracker: MediaPipe 初始化失败: {e}")
             raise e
 
     def detect(self, mp_image, timestamp_ms):

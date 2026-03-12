@@ -1,6 +1,7 @@
 import multiprocessing
 import queue
 import time
+import signal
 import math
 import numpy as np
 import mediapipe as mp
@@ -22,6 +23,9 @@ class HandProcessorProcess(multiprocessing.Process):
         self.daemon = True
 
     def run(self):
+        # 忽略 SIGINT 信号，让主进程处理 Ctrl+C
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
         # --- 在子进程中初始化资源 ---
         
         # 1. 连接共享内存 (双缓冲)
@@ -44,10 +48,10 @@ class HandProcessorProcess(multiprocessing.Process):
         try:
             tracker = HandTracker(fov=self.fov)
         except Exception as e:
-            print(f"HandProcessorProcess: Failed to init HandTracker: {e}")
+            print(f"HandProcessorProcess: 初始化 HandTracker 失败: {e}")
             return
         
-        print(f"HandProcessorProcess: Started and Ready. FOV={self.fov}")
+        print(f"HandProcessorProcess: 进程已启动并就绪。")
 
         # 初始化缓存
         cached_dims = (0, 0)
@@ -55,8 +59,16 @@ class HandProcessorProcess(multiprocessing.Process):
 
         while not self.stop_event.is_set():
             try:
-                # 阻塞等待任务
-                task = self.input_queue.get(timeout=0.1)
+                # 非阻塞检查停止事件，带超时
+                if self.stop_event.is_set():
+                    break
+
+                try:
+                    # 阻塞等待任务，设置短超时以便定期检查 stop_event
+                    task = self.input_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
                 frame_id = task['frame_id']
                 buffer_idx = task.get('buffer_idx', 0)
                 

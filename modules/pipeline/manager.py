@@ -255,6 +255,9 @@ class FrustumGazePipeline:
         self.running = False
         self.stop_event.set() # 设置停止事件，通知所有子进程退出
         
+        # 清空所有队列，防止子进程因队列满而阻塞
+        self._drain_queues()
+        
         # 等待子进程结束，若超时则强制终止
         if self.face_process:
             self.face_process.join(timeout=2.0)
@@ -287,6 +290,23 @@ class FrustumGazePipeline:
             except Exception as e:
                 print(f"清理共享内存失败: {e}")
         cv2.destroyAllWindows() # 关闭所有 OpenCV 窗口
+
+    def _drain_queues(self):
+        """清空所有队列，防止子进程因队列满而阻塞无法退出。"""
+        queues = [
+            self.input_queue, self.output_queue,
+            self.hand_input_queue, self.hand_output_queue,
+            self.pose_input_queue, self.pose_output_queue
+        ]
+        for q in queues:
+            try:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+            except Exception:
+                pass
 
     def run(self):
         """
@@ -516,12 +536,12 @@ class FrustumGazePipeline:
             stats = self.stats_manager.get_stats()
             should_stop = self.visualizer.render(
                 self.current_display_frame, 
-                self.latest_roi_info, 
-                self.latest_eye_points, 
-                self.latest_raw_eye_points, 
-                self.eye_tracker, 
-                stats['fps'], 
-                self.latest_gaze_data,
+                roi_info=self.latest_roi_info, 
+                eye_points=self.latest_eye_points, 
+                raw_eye_points=self.latest_raw_eye_points, 
+                tracker=self.eye_tracker, 
+                fps=stats['fps'], 
+                gaze_data=self.latest_gaze_data,
                 hand_result=self.latest_hand_result,
                 pose_result=self.latest_pose_result,
                 drop_rate=stats['drop_rate'],
