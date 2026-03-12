@@ -42,9 +42,9 @@ graph TD
 
 ## 2. 核心模块详解
 
-### 2.1 Pipeline (`modules/pipeline.py`)
+### 2.1 Pipeline (`modules/pipeline/manager.py`)
 
-`FrustumGazePipeline` 是系统的核心控制器，负责整个应用程序的生命周期管理。
+`FrustumGazePipeline` (位于 `manager.py`) 是系统的核心控制器，负责整个应用程序的生命周期管理。
 
 #### 主要职责
 1.  **初始化 (`setup`)**:
@@ -53,7 +53,7 @@ graph TD
     *   申请双缓冲共享内存 (`SharedMemory`)。
     *   初始化网络发送模块 (`UDPSender`) 和可视化模块 (`Visualizer`)。
 2.  **进程管理 (`start_processes`, `stop`)**:
-    *   创建并启动 `FaceProcessorProcess`, `HandProcessorProcess`, `PoseProcessorProcess`。
+    *   创建并启动 `FrameProcessorProcess` (人脸), `HandProcessorProcess`, `PoseProcessorProcess`。
     *   处理优雅退出，确保释放所有资源（摄像头、共享内存、子进程）。
 3.  **主循环 (`run`)**:
     *   **视频采集**: 从摄像头读取每一帧。
@@ -72,12 +72,13 @@ graph TD
     *   通过 Buffer Index 在队列中传递当前帧所在的内存块索引。
 *   **Zero-Copy**: 子进程直接通过 `numpy.ndarray` 映射访问共享内存，无需数据拷贝，极大降低了延迟。
 
-### 2.3 追踪器模块 (`trackers/`)
+### 2.3 追踪进程与逻辑 (`modules/pipeline/` & `trackers/`)
 
 所有追踪逻辑封装在独立的子进程中，通过继承 `multiprocessing.Process` 实现。
 
-#### 2.3.1 人脸追踪 (`trackers/face_mesh.py`)
+#### 2.3.1 人脸追踪进程 (`modules/pipeline/face_process.py`)
 *   **类名**: `FrameProcessorProcess`
+*   **依赖**: `trackers/face_mesh.py` (FaceMeshTracker)
 *   **核心功能**:
     *   **MediaPipe Face Mesh**: 运行高精度人脸关键点检测。
     *   **智能 ROI 策略**:
@@ -86,8 +87,9 @@ graph TD
     *   **视线解算**: 内部集成 `EyeTracker`，在子进程中直接计算 3D 视线向量和头部姿态，减轻主进程负担。
     *   **图像预处理**: 使用 CLAHE (自适应直方图均衡化) 增强对比度，提高在暗光环境下的鲁棒性。
 
-#### 2.3.2 手部追踪 (`trackers/hand_tracker.py`)
+#### 2.3.2 手部追踪进程 (`modules/pipeline/hand_process.py`)
 *   **类名**: `HandProcessorProcess`
+*   **依赖**: `trackers/hand_tracker.py` (HandTracker)
 *   **核心功能**:
     *   **MediaPipe Hands**: 检测手部 21 个关键点。
     *   **独立 ROI**: 类似于人脸，手部也有独立的 ROI 追踪逻辑。
@@ -96,7 +98,7 @@ graph TD
         *   **KalmanFilter**: 处理运动预测和平滑。
     *   **手势识别**: 简单的捏合（Pinch）检测。
 
-#### 2.3.3 姿态追踪 (`trackers/pose_tracker.py`)
+#### 2.3.3 姿态追踪进程 (`modules/pipeline/pose_process.py`)
 *   **类名**: `PoseProcessorProcess`
 *   **核心功能**:
     *   **MediaPipe Pose**: 检测身体骨骼关键点。
