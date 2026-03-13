@@ -179,8 +179,13 @@ class FrustumGazePipeline:
             exposure=exposure_val
         ).start()
 
-        # 等待摄像头预热，确保帧数据稳定
-        time.sleep(1.0)
+        # 自适应等待首帧，避免固定 1s 阻塞启动
+        warmup_deadline = time.time() + 0.35
+        while time.time() < warmup_deadline:
+            got_frame, _ = self.video_stream.read()
+            if got_frame:
+                break
+            time.sleep(0.01)
 
         # 6. 读取实际分辨率并创建共享内存
         actual_w = self.video_stream.get(cv2.CAP_PROP_FRAME_WIDTH)

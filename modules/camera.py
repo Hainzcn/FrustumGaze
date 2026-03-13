@@ -451,6 +451,28 @@ def select_camera_device(config_manager):
     """
     last_id = config_manager.get_last_camera()
     should_scan = config_manager.should_scan_new_cameras()
+
+    def _try_open_index(camera_index):
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(camera_index, cv2.CAP_ANY)
+        opened = cap.isOpened()
+        cap.release()
+        return opened
+
+    if not should_scan and last_id:
+        saved_info = config_manager.get_camera_info(last_id)
+        if saved_info and "last_index" in saved_info:
+            try:
+                cached_index = int(saved_info["last_index"])
+                if _try_open_index(cached_index):
+                    default_fov = saved_info.get("fov", 60.0)
+                    print(f"快速启动：使用缓存索引 {cached_index} 直连上次设备。")
+                    return cached_index, default_fov
+                print(f"缓存索引 {cached_index} 无法打开，回退到设备映射匹配。")
+            except (TypeError, ValueError):
+                pass
     
     # 获取 DirectShow 设备映射 (Index -> ID)
     dshow_map = get_dshow_device_map()
@@ -491,12 +513,7 @@ def select_camera_device(config_manager):
 
         if target_index is not None:
              # 验证可用性
-             temp_cap = cv2.VideoCapture(target_index, cv2.CAP_DSHOW)
-             if not temp_cap.isOpened():
-                 temp_cap = cv2.VideoCapture(target_index, cv2.CAP_ANY)
-                 
-             if temp_cap.isOpened():
-                 temp_cap.release()
+             if _try_open_index(target_index):
                  # 更新 last_index 以备后用
                  config_manager.update_camera(last_id, last_index=target_index)
                  
