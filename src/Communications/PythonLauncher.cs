@@ -31,7 +31,11 @@ public class PythonLauncher : MonoBehaviour
     [Tooltip("是否在退出或销毁时自动关闭 Python 进程")]
     public bool killOnQuit = true;
 
+    [Tooltip("优雅退出等待时间（毫秒），超时后强制结束")]
+    public int gracefulShutdownTimeoutMs = 2000;
+
     private Process _process;
+    private bool _isStopping;
 
     void Start()
     {
@@ -43,6 +47,12 @@ public class PythonLauncher : MonoBehaviour
 
     public void Launch()
     {
+        if (_process != null && _process.HasExited)
+        {
+            _process.Dispose();
+            _process = null;
+        }
+
         if (_process != null && !_process.HasExited)
         {
             UnityEngine.Debug.LogWarning("[PythonLauncher] 服务端已在运行中，无需重复启动。");
@@ -94,28 +104,24 @@ public class PythonLauncher : MonoBehaviour
 
         ProcessStartInfo startInfo = new ProcessStartInfo();
         startInfo.FileName = pythonExecutable;
-        startInfo.Arguments = $"\"{finalScriptPath}\" {arguments}";
+        string extraArguments = string.IsNullOrWhiteSpace(arguments) ? "" : $" {arguments}";
+        startInfo.Arguments = $"-u \"{finalScriptPath}\"{extraArguments}";
         startInfo.WorkingDirectory = finalWorkingDir;
-        
-        startInfo.UseShellExecute = showConsole;
+        startInfo.UseShellExecute = false;
         startInfo.CreateNoWindow = !showConsole;
-
-        // 如果不显示窗口，则重定向输出以便在 Unity Console 查看 (仅限 UseShellExecute = false)
-        if (!showConsole)
-        {
-            startInfo.RedirectStandardOutput = true;
-            startInfo.RedirectStandardError = true;
-            startInfo.UseShellExecute = false; 
-        }
+        startInfo.RedirectStandardInput = true;
+        startInfo.RedirectStandardOutput = !showConsole;
+        startInfo.RedirectStandardError = !showConsole;
 
         try
         {
             _process = Process.Start(startInfo);
+            _process.EnableRaisingEvents = true;
+            _process.Exited += OnPythonProcessExited;
             UnityEngine.Debug.Log($"[PythonLauncher] Python 服务端已启动 (PID: {_process.Id})\nScript: {finalScriptPath}");
 
             if (!showConsole)
             {
-                // 异步读取输出
                 _process.OutputDataReceived += (sender, args) => { if (args.Data != null) UnityEngine.Debug.Log($"[Py Server]: {args.Data}"); };
                 _process.ErrorDataReceived += (sender, args) => { if (args.Data != null) UnityEngine.Debug.LogError($"[Py Error]: {args.Data}"); };
                 _process.BeginOutputReadLine();
@@ -157,22 +163,66 @@ public class PythonLauncher : MonoBehaviour
 
     private void KillProcess()
     {
-        if (killOnQuit && _process != null && !_process.HasExited)
+        if (_isStopping)
         {
-            try 
+            return;
+        }
+
+        _isStopping = true;
+        try
+        {
+            if (_process == null)
+            {
+                return;
+            }
+
+            if (_process.HasExited)
+            {
+                _process.Dispose();
+                _process = null;
+                return;
+            }
+
+            if (!killOnQuit)
+            {
+                return;
+            }
+
+            bool exited = false;
+            try
+            {
+                if (_process.CloseMainWindow())
+                {
+                    exited = _process.WaitForExit(gracefulShutdownTimeoutMs);
+                }
+            }
+            catch {}
+
+            if (!exited && !_process.HasExited)
             {
                 _process.Kill();
-                UnityEngine.Debug.Log("[PythonLauncher] Python 服务端已关闭。");
+                _process.WaitForExit(1000);
             }
-            catch (System.Exception e)
-            {
-                UnityEngine.Debug.LogError($"[PythonLauncher] 关闭进程失败: {e.Message}");
-            }
-            finally
+
+            UnityEngine.Debug.Log("[PythonLauncher] Python 服务端已关闭。");
+        }
+        catch (System.Exception e)
+        {
+            UnityEngine.Debug.LogError($"[PythonLauncher] 关闭进程失败: {e.Message}");
+        }
+        finally
+        {
+            if (_process != null)
             {
                 _process.Dispose();
                 _process = null;
             }
+            _isStopping = false;
         }
+    }
+
+    private void OnPythonProcessExited(object sender, System.EventArgs e)
+    {
+        UnityEngine.Debug.Log("[PythonLauncher] Python 服务端进程已退出。");
     }
 }

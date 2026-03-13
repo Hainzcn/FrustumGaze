@@ -4,6 +4,7 @@ import time
 import queue
 import multiprocessing
 import sys
+import os
 from collections import deque
 
 from config.settings import VISUALIZE, UDP_IP, UDP_PORT, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL, POSE_TRACKING_INTERVAL
@@ -78,6 +79,7 @@ class FrustumGazePipeline:
         
         # 管道运行状态
         self.running = False # 管道是否正在运行
+        self.stopped = False
         self.current_display_frame = None # 当前用于显示的帧
         
         # 最新检测结果缓存
@@ -106,6 +108,17 @@ class FrustumGazePipeline:
             'rmat': None # 旋转矩阵
         }
 
+    def _cleanup_shared_memory(self):
+        for mgr in self.shm_managers:
+            try:
+                mgr.close()
+                mgr.unlink()
+            except Exception as e:
+                print(f"清理共享内存失败: {e}")
+        self.shm_managers = []
+        self.shm_arrays = []
+        self.shm_names = []
+
     def setup(self):
         """
         初始化摄像头并设置分辨率。
@@ -116,6 +129,7 @@ class FrustumGazePipeline:
         4. 启动视频流并创建共享内存。
         5. 初始化相机模型。
         """
+        self.stopped = False
         # 1. 摄像头选择
         self.camera_index, self.camera_fov = select_camera_device(self.config_manager)
         if self.camera_index is None:
@@ -198,8 +212,9 @@ class FrustumGazePipeline:
         self.frame_shape = (int(actual_h), int(actual_w), 3)
         
         # 初始化共享内存块 (双缓冲机制，用于主进程与子进程间高效传输帧数据)
+        session_tag = f"{os.getpid()}_{int(time.time() * 1000)}"
         for i in range(2):
-            name = f"frustum_gaze_frame_buffer_{i}"
+            name = f"frustum_gaze_frame_buffer_{session_tag}_{i}"
             try:
                 mgr, arr = create_shared_array(self.frame_shape, dtype=np.uint8, name=name)
                 self.shm_names.append(name)
@@ -207,6 +222,7 @@ class FrustumGazePipeline:
                 self.shm_arrays.append(arr)
             except Exception as e:
                 print(f"创建共享内存 {name} 失败: {e}")
+                self._cleanup_shared_memory()
                 return False
         
         self.video_stream.set_shared_memory(self.shm_arrays)
@@ -260,6 +276,9 @@ class FrustumGazePipeline:
         停止所有子进程、视频流，并释放共享内存和 OpenCV 窗口。
         确保所有资源被正确清理。
         """
+        if self.stopped:
+            return
+        self.stopped = True
         print("正在停止所有进程...")
         self.running = False
         self.stop_event.set() # 设置停止事件，通知所有子进程退出
@@ -292,12 +311,7 @@ class FrustumGazePipeline:
         self.udp_sender.close() # 关闭 UDP 发送器
         
         # 清理共享内存
-        for mgr in self.shm_managers:
-            try:
-                mgr.close()
-                mgr.unlink()
-            except Exception as e:
-                print(f"清理共享内存失败: {e}")
+        self._cleanup_shared_memory()
         cv2.destroyAllWindows() # 关闭所有 OpenCV 窗口
 
     def _drain_queues(self):

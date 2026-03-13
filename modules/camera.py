@@ -627,12 +627,21 @@ def select_resolution(cap, camera_index, config_manager):
     if not device_id:
         device_id = str(camera_index)
 
-    # 1. 优先读取配置
+    def _try_set_resolution(target_w, target_h):
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(target_w))
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(target_h))
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return actual_w == int(target_w) and actual_h == int(target_h), actual_w, actual_h
+
     saved_info = config_manager.get_camera_info(device_id)
     if saved_info and "resolution" in saved_info:
         w, h = saved_info["resolution"]
-        print(f"使用已保存的分辨率配置: {w}x{h}")
-        return w, h
+        ok, actual_w, actual_h = _try_set_resolution(w, h)
+        if ok:
+            print(f"使用已保存的分辨率配置: {w}x{h}")
+            return int(w), int(h)
+        print(f"已保存分辨率 {w}x{h} 应用失败，当前为 {actual_w}x{actual_h}，将回退扫描。")
 
     # 2. 扫描支持的分辨率 (仅在首次配置时执行)
     print("正在扫描摄像头支持的分辨率（可能会有机械变焦声）...")
@@ -647,13 +656,12 @@ def select_resolution(cap, camera_index, config_manager):
     ]
     available = []
     
-    current_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    current_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    current_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    current_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     for w, h in candidates:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        if int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) == w and int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == h:
+        ok, _, _ = _try_set_resolution(w, h)
+        if ok:
             available.append((w, h))
             
     # 恢复默认分辨率以免影响后续
@@ -662,7 +670,7 @@ def select_resolution(cap, camera_index, config_manager):
 
     if not available:
         print("未能检测到标准分辨率，将使用默认值。")
-        return int(current_w), int(current_h)
+        return current_w, current_h
         
     print("请选择分辨率：")
     for i, (w, h) in enumerate(available):
