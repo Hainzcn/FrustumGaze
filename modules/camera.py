@@ -144,6 +144,7 @@ class ConfigManager:
         
         self.cameras_data = self._load_json(self.cameras_config_path)
         self.user_prefs = self._load_json(self.user_config_path)
+        self._cleanup_legacy_index_entries()
 
     def _load_json(self, path):
         if os.path.exists(path):
@@ -158,12 +159,95 @@ class ConfigManager:
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
+    def _find_camera_id_by_index(self, camera_index):
+        try:
+            idx = int(camera_index)
+        except (TypeError, ValueError):
+            return None
+        for dev_id, info in self.cameras_data.items():
+            if not isinstance(info, dict):
+                continue
+            if str(dev_id).isdigit():
+                continue
+            if info.get("last_index") == idx:
+                return str(dev_id)
+        return None
+
+    def _resolve_device_id(self, device_id, last_index=None):
+        device_key = str(device_id)
+        if not device_key.isdigit():
+            return device_key
+        mapped_id = None
+        if last_index is not None:
+            mapped_id = self._find_camera_id_by_index(last_index)
+        if not mapped_id:
+            mapped_id = self._find_camera_id_by_index(device_key)
+        return mapped_id if mapped_id else device_key
+
+    def migrate_camera_id(self, old_device_id, new_device_id, name=None, last_index=None):
+        old_key = str(old_device_id)
+        new_key = str(new_device_id)
+        if old_key == new_key:
+            return new_key
+
+        old_info = self.cameras_data.get(old_key, {})
+        new_info = self.cameras_data.get(new_key, {})
+        merged_info = {}
+
+        if isinstance(old_info, dict):
+            merged_info.update(old_info)
+        if isinstance(new_info, dict):
+            merged_info.update(new_info)
+
+        if name is not None:
+            merged_info["name"] = name
+        elif "name" not in merged_info:
+            merged_info["name"] = f"Camera {new_key}"
+
+        if last_index is not None:
+            merged_info["last_index"] = int(last_index)
+        elif old_key.isdigit() and "last_index" not in merged_info:
+            merged_info["last_index"] = int(old_key)
+
+        if "fov" not in merged_info:
+            merged_info["fov"] = 60.0
+        if "user_configured" not in merged_info:
+            merged_info["user_configured"] = False
+
+        self.cameras_data[new_key] = merged_info
+        if old_key in self.cameras_data:
+            del self.cameras_data[old_key]
+        self._save_json(self.cameras_config_path, self.cameras_data)
+
+        if self.user_prefs.get('last_camera_id') == old_key:
+            self.user_prefs['last_camera_id'] = new_key
+            self._save_json(self.user_config_path, self.user_prefs)
+
+        return new_key
+
+    def _cleanup_legacy_index_entries(self):
+        legacy_keys = [str(key) for key in self.cameras_data.keys() if str(key).isdigit()]
+        changed = False
+        for legacy_key in legacy_keys:
+            mapped_id = self._find_camera_id_by_index(legacy_key)
+            if not mapped_id:
+                continue
+            self.migrate_camera_id(legacy_key, mapped_id)
+            changed = True
+        if changed:
+            self._save_json(self.cameras_config_path, self.cameras_data)
+
     # --- 摄像头数据管理 ---
     def update_camera(self, device_id, fov=None, name=None, user_configured=False, resolution=None, exposure=None, api_backend=None, last_index=None):
         """
         更新摄像头配置。
         device_id: 摄像头的唯一标识符 (InstanceId)
         """
+        original_device_id = str(device_id)
+        device_id = self._resolve_device_id(device_id, last_index=last_index)
+        if original_device_id != device_id and original_device_id in self.cameras_data:
+            self.migrate_camera_id(original_device_id, device_id, last_index=last_index)
+
         if device_id not in self.cameras_data:
             self.cameras_data[device_id] = {
                 "name": name if name else f"Camera {device_id}",
@@ -189,11 +273,16 @@ class ConfigManager:
         self._save_json(self.cameras_config_path, self.cameras_data)
 
     def get_camera_info(self, device_id):
-        return self.cameras_data.get(device_id)
+        original_device_id = str(device_id)
+        resolved_device_id = self._resolve_device_id(device_id)
+        if original_device_id != resolved_device_id and original_device_id in self.cameras_data:
+            self.migrate_camera_id(original_device_id, resolved_device_id)
+        return self.cameras_data.get(resolved_device_id)
 
     # --- 用户偏好管理 ---
     def set_last_camera(self, device_id):
-        self.user_prefs['last_camera_id'] = device_id
+        normalized_id = self._resolve_device_id(device_id)
+        self.user_prefs['last_camera_id'] = normalized_id
         self._save_json(self.user_config_path, self.user_prefs)
 
     def get_last_camera(self):
@@ -365,6 +454,21 @@ def select_camera_device(config_manager):
     
     # 获取 DirectShow 设备映射 (Index -> ID)
     dshow_map = get_dshow_device_map()
+
+    if last_id and str(last_id).isdigit() and dshow_map:
+        legacy_index = int(str(last_id))
+        if legacy_index in dshow_map:
+            mapped_info = dshow_map[legacy_index]
+            mapped_id = mapped_info['id']
+            print(f"检测到旧版索引配置 {legacy_index}，已自动关联到设备 ID: {mapped_id}")
+            config_manager.migrate_camera_id(
+                old_device_id=last_id,
+                new_device_id=mapped_id,
+                name=mapped_info['name'],
+                last_index=legacy_index
+            )
+            config_manager.set_last_camera(mapped_id)
+            last_id = mapped_id
     
     # 策略 1: 快速启动 (基于 ID 匹配)
     if not should_scan and last_id:

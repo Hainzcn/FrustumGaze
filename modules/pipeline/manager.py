@@ -60,6 +60,7 @@ class FrustumGazePipeline:
         
         # 摄像头相关属性
         self.camera_index = None # 摄像头索引
+        self.camera_device_id = None # 摄像头设备唯一 ID
         self.camera_fov = 60.0 # 摄像头水平视场角 (FOV)
         self.video_stream = None # 视频流对象
         self.camera_model = None # 摄像头模型（包含内参等）
@@ -120,13 +121,16 @@ class FrustumGazePipeline:
         if self.camera_index is None:
             print("未选择摄像头，退出。")
             return False
+        self.camera_device_id = self.config_manager.get_last_camera()
+        if not self.camera_device_id:
+            self.camera_device_id = str(self.camera_index)
 
         # 2. 尝试不同的 OpenCV 后端 API
         cap_temp = None
         used_api = cv2.CAP_ANY
         api_candidates = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
         
-        camera_info = self.config_manager.get_camera_info(self.camera_index)
+        camera_info = self.config_manager.get_camera_info(self.camera_device_id)
         if camera_info and "api_backend" in camera_info:
             saved_api = int(camera_info["api_backend"])
             print(f"检测到上次成功使用的 API: {saved_api}，将优先尝试。")
@@ -140,7 +144,7 @@ class FrustumGazePipeline:
             if cap_temp.isOpened():
                 print(f"成功使用 API: {api}")
                 used_api = api
-                self.config_manager.update_camera(self.camera_index, api_backend=used_api)
+                self.config_manager.update_camera(self.camera_device_id, api_backend=used_api, last_index=self.camera_index)
                 break
             else:
                 print(f"API {api} 初始化失败。")
@@ -159,7 +163,7 @@ class FrustumGazePipeline:
             print(f"检测到已保存的曝光配置: {exposure_val}")
         else:
             print(f"使用默认曝光值: {exposure_val}")
-            self.config_manager.update_camera(self.camera_index, exposure=exposure_val)
+            self.config_manager.update_camera(self.camera_device_id, exposure=exposure_val, last_index=self.camera_index)
 
         cap_temp.release() # 释放临时捕获对象
 
