@@ -1,6 +1,7 @@
 import socket
 import threading
 import queue
+from config import settings
 
 class UDPSender:
     """
@@ -31,6 +32,10 @@ class UDPSender:
                     
                 # Send the data
                 self.sock.sendto(data_str.encode('utf-8'), (self.ip, self.port))
+                
+                if settings.PRINT_UDP_DATA:
+                    print(f"UDP Sent: {data_str}")
+                    
                 self.queue.task_done()
             except queue.Empty:
                 continue

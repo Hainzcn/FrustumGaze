@@ -3,7 +3,8 @@ import os
 import numpy as np
 
 # Visualization
-VISUALIZE = False # 设为 False 时，跳过所有可视化绘制，只保留计算和 UDP 发送
+VISUALIZE = True # 设为 False 时，跳过所有可视化绘制，只保留计算和 UDP 发送
+PRINT_UDP_DATA = True # 设为 True 时，在终端打印 UDP 发送的数据
 
 # Tracking Intervals (每多少帧处理一次)
 # 设置为 1 表示每一帧都处理
