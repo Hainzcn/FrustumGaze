@@ -7,6 +7,7 @@ class GlobalImagePreprocessor:
     全局图像预处理工具类
     提供静态方法用于缩放、灰度化、色域转换等，供所有模块复用
     """
+    _clahe_cache = {}
     
     @staticmethod
     def calculate_dimensions(original_shape, target_height):
@@ -109,19 +110,21 @@ class GlobalImagePreprocessor:
     def apply_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
         """
         应用 CLAHE (对比度受限自适应直方图均衡化)
-        如果是彩色图，只对 L 通道应用
+        如果是彩色图，只对 L 通道应用。CLAHE 实例按参数缓存复用。
         """
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        key = (clip_limit, tile_grid_size)
+        clahe = GlobalImagePreprocessor._clahe_cache.get(key)
+        if clahe is None:
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+            GlobalImagePreprocessor._clahe_cache[key] = clahe
         
         if len(image.shape) == 3:
-            # Convert to LAB color space
             lab = GlobalImagePreprocessor.to_lab(image)
             l, a, b = cv2.split(lab)
             l2 = clahe.apply(l)
             lab = cv2.merge((l2, a, b))
             return GlobalImagePreprocessor.from_lab_to_bgr(lab)
         else:
-            # Grayscale
             return clahe.apply(image)
 
 class ImagePreprocessor:

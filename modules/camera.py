@@ -319,6 +319,7 @@ class WebcamVideoStream:
         self.api_preference = api_preference
         self.exposure = exposure
         self.shm_arrays = shm_arrays # 共享内存数组列表
+        self.triple_buffer_idx = None # 三缓冲原子索引 (multiprocessing.Value)
         
         # 初始化摄像头
         self.stream = cv2.VideoCapture(self.src, self.api_preference)
@@ -371,12 +372,13 @@ class WebcamVideoStream:
         self.t.start()
         return self
 
-    def set_shared_memory(self, shm_arrays):
-        """延迟设置共享内存 (支持双缓冲列表)"""
+    def set_shared_memory(self, shm_arrays, triple_buffer_idx=None):
+        """延迟设置共享内存 (支持三缓冲列表)"""
         if isinstance(shm_arrays, list):
             self.shm_arrays = shm_arrays
         else:
             self.shm_arrays = [shm_arrays]
+        self.triple_buffer_idx = triple_buffer_idx
 
     def update(self):
         """后台线程持续读取帧"""
@@ -398,12 +400,20 @@ class WebcamVideoStream:
             buffer_idx = -1
             if self.shm_arrays is not None and frame is not None:
                 try:
-                    # 双缓冲逻辑: 根据 frame_id 奇偶性选择 buffer
-                    buffer_idx = self.frame_id % len(self.shm_arrays)
-                    target_shm = self.shm_arrays[buffer_idx]
-                    
-                    if frame.shape == target_shm.shape:
-                        np.copyto(target_shm, frame)
+                    if self.triple_buffer_idx is not None:
+                        # 三缓冲: 写入 (latest+1)%3，天然避开读端正在使用的 buffer
+                        latest = self.triple_buffer_idx.value
+                        write_idx = (latest + 1) % 3
+                        target_shm = self.shm_arrays[write_idx]
+                        if frame.shape == target_shm.shape:
+                            np.copyto(target_shm, frame)
+                            self.triple_buffer_idx.value = write_idx
+                        buffer_idx = write_idx
+                    else:
+                        buffer_idx = self.frame_id % len(self.shm_arrays)
+                        target_shm = self.shm_arrays[buffer_idx]
+                        if frame.shape == target_shm.shape:
+                            np.copyto(target_shm, frame)
                 except Exception:
                     pass
 
@@ -423,9 +433,11 @@ class WebcamVideoStream:
             except queue.Full:
                 pass
 
-    def read(self):
-        """获取最新帧"""
+    def read(self, timeout=None):
+        """获取最新帧。timeout>0 时阻塞等待，让主线程在无帧时让出 CPU。"""
         try:
+            if timeout is not None:
+                return True, self.frame_queue.get(timeout=timeout)
             return True, self.frame_queue.get_nowait()
         except queue.Empty:
             return False, (None, -1, -1)

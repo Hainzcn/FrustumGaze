@@ -12,7 +12,7 @@ from trackers.face_mesh import FaceMeshTracker, FaceDetectionResultLite
 from modules.camera import CameraModel
 
 class FrameProcessorProcess(multiprocessing.Process):
-    def __init__(self, input_queue, output_queue, preprocessor, stop_event, shm_names, frame_shape, camera_fov=60.0):
+    def __init__(self, input_queue, output_queue, preprocessor, stop_event, shm_names, frame_shape, camera_fov=60.0, triple_buffer_idx=None):
         super().__init__()
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -21,6 +21,7 @@ class FrameProcessorProcess(multiprocessing.Process):
         self.shm_names = shm_names # List of names
         self.frame_shape = frame_shape
         self.camera_fov = camera_fov
+        self.triple_buffer_idx = triple_buffer_idx # 三缓冲原子索引
         self.last_landmarks_norm = None
         self.daemon = True # 设置为守护进程
         self.using_full_scan = True # 初始化状态
@@ -31,7 +32,7 @@ class FrameProcessorProcess(multiprocessing.Process):
 
         # --- 在子进程中初始化资源 ---
         
-        # 1. 连接共享内存 (双缓冲)
+        # 1. 连接共享内存 (三缓冲)
         self.shm_managers = []
         self.shm_arrays = []
         
@@ -78,11 +79,15 @@ class FrameProcessorProcess(multiprocessing.Process):
                     continue
                 
                 frame_id = task['frame_id']
-                buffer_idx = task.get('buffer_idx', 0)
                 
-                # 从共享内存直接访问
-                if buffer_idx < len(self.shm_arrays):
-                    frame = self.shm_arrays[buffer_idx]
+                # 三缓冲：始终从最近写完的 buffer 读取
+                if self.triple_buffer_idx is not None:
+                    read_idx = self.triple_buffer_idx.value
+                else:
+                    read_idx = task.get('buffer_idx', 0)
+                
+                if 0 <= read_idx < len(self.shm_arrays):
+                    frame = self.shm_arrays[read_idx]
                 else:
                     frame = self.shm_arrays[0]
 
@@ -137,10 +142,10 @@ class FrameProcessorProcess(multiprocessing.Process):
                     self.last_landmarks_norm = None
                 
                 result_lite = None
-                processed_gaze_data = None
+                gaze_result = None
                 
                 if self.using_full_scan and detection_result.face_landmarks:
-                    result_lite = FaceDetectionResultLite([]) # 空的关键点列表
+                    result_lite = FaceDetectionResultLite([])
                     tracker.reset()
                 elif not self.using_full_scan and detection_result.face_landmarks:
                     result_lite = FaceDetectionResultLite(detection_result.face_landmarks)
@@ -148,17 +153,10 @@ class FrameProcessorProcess(multiprocessing.Process):
                     should_calc_gaze = (frame_id % settings.EYE_GAZE_CALCULATION_INTERVAL == 0)
                     face_landmarks = detection_result.face_landmarks[0]
                     
-                    processed_gaze_data = tracker.process_landmarks(
+                    gaze_result = tracker.process_landmarks(
                         face_landmarks, w, h, self.camera_fov, cam_matrix, dist_coeffs,
                         should_calc_gaze=should_calc_gaze
                     )
-                    
-                    if processed_gaze_data:
-                        est_dist, off_x, off_y = tracker.get_gaze_params()
-                        processed_gaze_data['gaze_params'] = (est_dist, off_x, off_y)
-                        processed_gaze_data['head_center_pos'] = tracker.head_center_pos
-                        processed_gaze_data['current_pixel_dist'] = tracker.current_pixel_dist
-                        processed_gaze_data['current_depth_details'] = tracker.current_depth_details
                 else:
                     tracker.reset()
 
@@ -174,7 +172,7 @@ class FrameProcessorProcess(multiprocessing.Process):
                     'roi_info': roi_info,
                     'using_full_scan': self.using_full_scan,
                     'timestamp': timestamp_ms,
-                    'processed_gaze_data': processed_gaze_data
+                    'gaze_result': gaze_result
                 })
                 
             except queue.Empty:

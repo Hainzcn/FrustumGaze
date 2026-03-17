@@ -12,7 +12,7 @@ from trackers.hand_tracker import HandTracker, HandDetectionResultLite
 from trackers.common import LandmarkLite
 
 class HandProcessorProcess(multiprocessing.Process):
-    def __init__(self, input_queue, output_queue, stop_event, shm_names, frame_shape, fov=60.0):
+    def __init__(self, input_queue, output_queue, stop_event, shm_names, frame_shape, fov=60.0, triple_buffer_idx=None):
         super().__init__()
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -20,6 +20,7 @@ class HandProcessorProcess(multiprocessing.Process):
         self.shm_names = shm_names # List of names
         self.frame_shape = frame_shape
         self.fov = fov
+        self.triple_buffer_idx = triple_buffer_idx # 三缓冲原子索引
         self.daemon = True
 
     def run(self):
@@ -28,7 +29,7 @@ class HandProcessorProcess(multiprocessing.Process):
 
         # --- 在子进程中初始化资源 ---
         
-        # 1. 连接共享内存 (双缓冲)
+        # 1. 连接共享内存 (三缓冲)
         self.shm_managers = []
         self.shm_arrays = []
         
@@ -70,11 +71,15 @@ class HandProcessorProcess(multiprocessing.Process):
                     continue
 
                 frame_id = task['frame_id']
-                buffer_idx = task.get('buffer_idx', 0)
                 
-                # 从共享内存复制图像数据
-                if buffer_idx < len(self.shm_arrays):
-                    frame = self.shm_arrays[buffer_idx]
+                # 三缓冲：始终从最近写完的 buffer 读取
+                if self.triple_buffer_idx is not None:
+                    read_idx = self.triple_buffer_idx.value
+                else:
+                    read_idx = task.get('buffer_idx', 0)
+                
+                if 0 <= read_idx < len(self.shm_arrays):
+                    frame = self.shm_arrays[read_idx]
                 else:
                     frame = self.shm_arrays[0]
                 

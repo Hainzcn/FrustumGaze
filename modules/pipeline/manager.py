@@ -14,7 +14,7 @@ from modules.visualizer import Visualizer
 from modules.shared_mem import create_shared_array
 from modules.stats import StatsManager
 from utils.image_utils import ImagePreprocessor
-from trackers.eye_tracker import EyeTracker
+from trackers.eye_tracker import GazeResult
 from .face_process import FrameProcessorProcess
 from .hand_process import HandProcessorProcess
 from .pose_process import PoseProcessorProcess
@@ -55,8 +55,8 @@ class FrustumGazePipeline:
         self.udp_sender = UDPSender(UDP_IP, UDP_PORT) # UDP 数据发送器
         self.visualizer = Visualizer() # 可视化工具
         
-        # 追踪器实例
-        self.eye_tracker = EyeTracker() # 眼动追踪器
+        # 追踪器 / 预处理
+        self.latest_gaze_result = None # 子进程回传的 GazeResult（取代主进程 EyeTracker 镜像）
         self.preprocessor = ImagePreprocessor() # 图像预处理器
         
         # 摄像头相关属性
@@ -66,11 +66,12 @@ class FrustumGazePipeline:
         self.video_stream = None # 视频流对象
         self.camera_model = None # 摄像头模型（包含内参等）
         
-        # 共享内存管理
+        # 共享内存管理 (三缓冲)
         self.shm_names = [] # 共享内存名称列表
         self.shm_managers = [] # 共享内存管理器列表
         self.shm_arrays = [] # 共享 NumPy 数组列表
         self.frame_shape = None # 视频帧的形状 (高, 宽, 通道数)
+        self.triple_buffer_idx = multiprocessing.Value('i', 0) # 三缓冲原子索引：指向最近写完的 buffer
         
         # 子进程实例
         self.face_process = None # 人脸处理子进程
@@ -211,9 +212,9 @@ class FrustumGazePipeline:
 
         self.frame_shape = (int(actual_h), int(actual_w), 3)
         
-        # 初始化共享内存块 (双缓冲机制，用于主进程与子进程间高效传输帧数据)
+        # 初始化共享内存块 (三缓冲机制：写端始终写非 latest buffer，读端从 latest 读取，天然无冲突)
         session_tag = f"{os.getpid()}_{int(time.time() * 1000)}"
-        for i in range(2):
+        for i in range(3):
             name = f"frustum_gaze_frame_buffer_{session_tag}_{i}"
             try:
                 mgr, arr = create_shared_array(self.frame_shape, dtype=np.uint8, name=name)
@@ -225,7 +226,7 @@ class FrustumGazePipeline:
                 self._cleanup_shared_memory()
                 return False
         
-        self.video_stream.set_shared_memory(self.shm_arrays)
+        self.video_stream.set_shared_memory(self.shm_arrays, self.triple_buffer_idx)
 
         # 7. 相机模型初始化 (用于姿态和深度计算)
         self.camera_model = CameraModel(actual_w, actual_h, self.camera_fov)
@@ -246,7 +247,8 @@ class FrustumGazePipeline:
             self.stop_event, # 停止事件
             self.shm_names, # 共享内存名称
             self.frame_shape, # 帧形状
-            camera_fov=self.camera_fov # 摄像头视场角
+            camera_fov=self.camera_fov, # 摄像头视场角
+            triple_buffer_idx=self.triple_buffer_idx # 三缓冲原子索引
         )
         self.face_process.start()
 
@@ -256,7 +258,8 @@ class FrustumGazePipeline:
             self.stop_event, # 停止事件
             self.shm_names, # 共享内存名称
             self.frame_shape, # 帧形状
-            fov=self.camera_fov # 摄像头视场角
+            fov=self.camera_fov, # 摄像头视场角
+            triple_buffer_idx=self.triple_buffer_idx # 三缓冲原子索引
         )
         self.hand_process.start()
         
@@ -265,7 +268,8 @@ class FrustumGazePipeline:
             self.pose_output_queue, # 姿态追踪输出队列
             self.stop_event, # 停止事件
             self.shm_names, # 共享内存名称
-            self.frame_shape # 帧形状
+            self.frame_shape, # 帧形状
+            triple_buffer_idx=self.triple_buffer_idx # 三缓冲原子索引
         )
         self.pose_process.start()
 
@@ -368,16 +372,19 @@ class FrustumGazePipeline:
         - 帧数据通过共享内存传递，避免数据复制开销。
         - 使用帧计数器控制面部、手部和姿态追踪的频率。
         """
-        has_frame, frame_data = self.video_stream.read()
+        has_frame, frame_data = self.video_stream.read(timeout=0.033)
         if has_frame:
             frame, frame_id, buffer_idx = frame_data
             
-            # 如果 frame 为 None，表示视频流已将帧写入共享内存；否则，将帧复制到共享内存
+            # 如果 frame 为 None，表示视频流已将帧写入共享内存；否则，回退到直接传帧
             if frame is None and buffer_idx >= 0:
-                self.current_display_frame = self.shm_arrays[buffer_idx].copy()
+                if VISUALIZE:
+                    read_idx = self.triple_buffer_idx.value
+                    self.current_display_frame = self.shm_arrays[read_idx].copy()
             elif frame is not None:
                 np.copyto(self.shm_arrays[0], frame)
-                self.current_display_frame = frame
+                if VISUALIZE:
+                    self.current_display_frame = frame
                 buffer_idx = 0
             
             self.stats_manager.record_captured() # 记录捕获帧数
@@ -443,107 +450,66 @@ class FrustumGazePipeline:
 
     def _check_face_results(self):
         """
-        检查面部追踪子进程的输出队列，获取最新的人脸检测和视线追踪结果。
-        - 更新 EyeTracker 的内部状态。
-        - 根据头部姿态（Yaw, Pitch, Roll）重建旋转矩阵。
-        - 将视线数据通过 UDP 发送至 Unity。
+        检查面部追踪子进程的输出队列，获取最新的 GazeResult。
+        直接使用子进程返回的数据对象，无需逐字段手动同步。
         """
         try:
             result_data = self.output_queue.get_nowait()
             
-            self.latest_face_result = result_data['detection_result'] # 原始人脸检测结果
-            self.latest_roi_info = result_data['roi_info'] # 当前追踪的感兴趣区域 (ROI)
-            self.latest_using_full_scan = result_data.get('using_full_scan', False) # 是否处于全帧扫描模式
+            self.latest_face_result = result_data['detection_result']
+            self.latest_roi_info = result_data['roi_info']
+            self.latest_using_full_scan = result_data.get('using_full_scan', False)
             
-            self.stats_manager.record_processed() # 记录处理帧
-            self.stats_manager.update_fps() # 更新 FPS 统计
+            self.stats_manager.record_processed()
+            self.stats_manager.update_fps()
             
-            # 初始化/重置视线显示数据
             self.latest_eye_points = []
             self.latest_raw_eye_points = []
             self.latest_gaze_data = None
             
             if not self.latest_using_full_scan:
-                processed_gaze_data = result_data.get('processed_gaze_data')
+                gaze = result_data.get('gaze_result')
                 
-                if processed_gaze_data:
-                    # 从子进程结果更新主进程的追踪器状态
-                    est_dist, off_x, off_y = processed_gaze_data['gaze_params']
-                    self.eye_tracker.current_estimated_dist = est_dist
-                    self.eye_tracker.current_offset_x = off_x
-                    self.eye_tracker.current_offset_y = off_y
-                    self.eye_tracker.current_pixel_dist = processed_gaze_data.get('current_pixel_dist', 0)
-                    self.eye_tracker.head_center_pos = processed_gaze_data.get('head_center_pos')
-                    self.eye_tracker.current_yaw = processed_gaze_data.get('yaw', 0.0)
-                    self.eye_tracker.current_pitch = processed_gaze_data.get('pitch', 0.0)
-                    self.eye_tracker.current_geo_yaw = processed_gaze_data.get('geo_yaw', 0.0)
-                    self.eye_tracker.current_geo_pitch = processed_gaze_data.get('geo_pitch', 0.0)
-                    self.eye_tracker.current_depth_details = processed_gaze_data.get('current_depth_details', {})
-
-                    self.latest_eye_points = processed_gaze_data.get('eye_points', [])
-                    self.latest_raw_eye_points = processed_gaze_data.get('raw_eye_points', [])
+                if gaze:
+                    self.latest_gaze_result = gaze
+                    self.latest_eye_points = gaze.eye_points
+                    self.latest_raw_eye_points = gaze.raw_eye_points
                     
-                    # 构建平移向量 (兼容 visualizer 可视化接口)
-                    tvec = np.array([[off_x], [off_y], [est_dist]])
+                    # 构建平移向量与旋转矩阵 (可视化 + UDP)
+                    tvec = np.array([[gaze.offset_x], [gaze.offset_y], [gaze.estimated_dist]])
                     
-                    # 姿态重建：根据欧拉角 (Yaw, Pitch, Roll) 重建旋转矩阵
-                    # 注：Tracker 现采用几何法直接输出经滤波的 Yaw/Pitch
-                    yaw = self.eye_tracker.current_yaw
-                    pitch = self.eye_tracker.current_pitch
-                    roll = processed_gaze_data.get('roll', 0.0)
+                    y_rad = np.radians(gaze.yaw)
+                    p_rad = np.radians(gaze.pitch)
                     
-                    # 弧度转换
-                    y_rad = np.radians(yaw)
-                    p_rad = np.radians(pitch)
-                    r_rad = np.radians(roll)
-                    
-                    # 构造各轴旋转矩阵
-                    # Rx: 绕 X 轴旋转 (Pitch)
                     Rx = np.array([
                         [1, 0, 0],
                         [0, np.cos(p_rad), -np.sin(p_rad)],
                         [0, np.sin(p_rad), np.cos(p_rad)]
                     ])
-                    
-                    # Ry: 绕 Y 轴旋转 (Yaw)
                     Ry = np.array([
                         [np.cos(y_rad), 0, np.sin(y_rad)],
                         [0, 1, 0],
                         [-np.sin(y_rad), 0, np.cos(y_rad)]
                     ])
-                    
-                    # Rz: 绕 Z 轴旋转 (Roll)
-                    Rz = np.array([
-                        [np.cos(r_rad), -np.sin(r_rad), 0],
-                        [np.sin(r_rad), np.cos(r_rad), 0],
-                        [0, 0, 1]
-                    ])
-                    
-                    # 组合旋转矩阵 (按 Ry @ Rx 顺序)
                     rmat = Ry @ Rx
                     
                     if VISUALIZE:
-                        # 更新可视化数据容器
                         self.gaze_data_container['tvec'] = tvec
                         self.gaze_data_container['rmat'] = rmat
-                        # 将旋转矩阵转换为旋转向量 (用于 OpenCV 可视化函数)
                         rvec, _ = cv2.Rodrigues(rmat)
                         self.gaze_data_container['rvec'] = rvec
-                        
                         self.latest_gaze_data = self.gaze_data_container
                     
                     try:
-                        # 通过 UDP 发送视线追踪数据 (G:距离,X偏移,Y偏移)
-                        data_str = f"G:{est_dist:.2f},{off_x:.2f},{off_y:.2f}"
+                        data_str = f"G:{gaze.estimated_dist:.2f},{gaze.offset_x:.2f},{gaze.offset_y:.2f}"
                         self.udp_sender.send(data_str)
                     except Exception as e:
                         print(f"UDP 发送错误: {e}")
             else:
-                # 若丢失追踪或正在全帧扫描，重置追踪器状态
-                self.eye_tracker.reset()
+                self.latest_gaze_result = None
                 
         except queue.Empty:
-            pass # 输出队列为空，跳过本帧处理
+            pass
 
     def _update_stats(self):
         """每秒更新一次丢包率统计。"""
@@ -562,7 +528,7 @@ class FrustumGazePipeline:
                 roi_info=self.latest_roi_info, 
                 eye_points=self.latest_eye_points, 
                 raw_eye_points=self.latest_raw_eye_points, 
-                tracker=self.eye_tracker, 
+                gaze_result=self.latest_gaze_result, 
                 fps=stats['fps'], 
                 gaze_data=self.latest_gaze_data,
                 hand_result=self.latest_hand_result,
@@ -575,10 +541,8 @@ class FrustumGazePipeline:
             )
             return should_stop
         else:
-            # 非可视化模式下的简单循环控制
             if VISUALIZE:
                 if cv2.waitKey(1) & 0xFF == 27:
                     return True
-            else:
-                time.sleep(0.001) # 降低 CPU 占用
+            # VISUALIZE=False 时无需 sleep，_process_frame 的阻塞读已让出 CPU
             return False

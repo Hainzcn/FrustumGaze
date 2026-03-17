@@ -2,6 +2,7 @@ import cv2
 import time
 import math
 import numpy as np
+from dataclasses import dataclass, field
 from utils.math_utils import OneEuroFilter, OneDKalmanFilter
 import config.settings as settings
 
@@ -13,6 +14,41 @@ import config.settings as settings
 - 基于双通道策略（宽度与长度）估算头部到相机的深度，并融合得到稳健的距离。
 - 基于针孔相机模型计算头部中心相对于相机光轴的物理偏移（X/Y）。
 """
+
+@dataclass
+class GazeResult:
+    """
+    子进程→主进程的视线追踪结果，作为跨进程传输的唯一数据契约。
+    新增字段只需在此处添加，即可自动传播到主进程和可视化层。
+    """
+    estimated_dist: float = 0.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    pixel_dist: float = 0.0
+    yaw: float = 0.0
+    pitch: float = 0.0
+    roll: float = 0.0
+    head_center_pos: tuple = None
+    depth_details: dict = field(default_factory=dict)
+    eye_points: list = field(default_factory=list)
+    raw_eye_points: list = field(default_factory=list)
+    calibrated_width: float = 0.0
+
+    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, cam_matrix, eye_radius=60.0, rmat=None):
+        """计算单眼的 3D 视线向量 (近似模型)"""
+        p_iris = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
+        ray = np.dot(np.linalg.inv(cam_matrix), p_iris)
+        ray /= np.linalg.norm(ray)
+
+        z = self.estimated_dist
+        iris_cam = ray * (z / ray[2]) if ray[2] != 0 else ray * z
+
+        T = np.array([self.offset_x, self.offset_y, self.estimated_dist])
+        eye_center_cam = np.dot(rmat, eye_center_model_3d) + T
+
+        gaze = iris_cam - eye_center_cam
+        return gaze / np.linalg.norm(gaze), eye_center_cam
+
 
 class EyeTracker:
     """
@@ -174,11 +210,20 @@ class EyeTracker:
         if track_p:
             self.update_offset(track_p, w, h, self.current_pixel_dist, self.current_estimated_dist, focal_length=focal_length)
         
-        return {
-            'eye_points': eye_pts, 'raw_eye_points': raw_eye_pts,
-            'yaw': self.current_yaw, 'pitch': self.current_pitch, 'roll': 0.0,
-            'calibrated_width': self.calibrated_width_cm
-        }
+        return GazeResult(
+            estimated_dist=self.current_estimated_dist,
+            offset_x=self.current_offset_x,
+            offset_y=self.current_offset_y,
+            pixel_dist=self.current_pixel_dist,
+            yaw=self.current_yaw,
+            pitch=self.current_pitch,
+            roll=0.0,
+            head_center_pos=self.head_center_pos,
+            depth_details=dict(self.current_depth_details) if self.current_depth_details else {},
+            eye_points=eye_pts,
+            raw_eye_points=raw_eye_pts,
+            calibrated_width=self.calibrated_width_cm,
+        )
 
     def _calculate_face_normal_pose(self, face_landmarks, w, h):
         """使用面部特征点几何关系估算姿态角"""
@@ -196,21 +241,6 @@ class EyeTracker:
         pitch = math.degrees(math.atan2(normal[1], normal[2])) + 30.0 # 经验偏置修正
         yaw = math.degrees(math.atan2(normal[0], normal[2]))
         return pitch, yaw
-
-    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, tvec, cam_matrix, dist_coeffs, eye_radius=60.0, rmat=None):
-        """计算单眼的 3D 视线向量 (近似模型)"""
-        p_iris = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
-        ray = np.dot(np.linalg.inv(cam_matrix), p_iris)
-        ray /= np.linalg.norm(ray)
-        
-        z = self.current_estimated_dist
-        iris_cam = ray * (z / ray[2]) if ray[2] != 0 else ray * z
-        
-        T = np.array([self.current_offset_x, self.current_offset_y, self.current_estimated_dist])
-        eye_center_cam = np.dot(rmat, eye_center_model_3d) + T
-        
-        gaze = iris_cam - eye_center_cam
-        return gaze / np.linalg.norm(gaze), eye_center_cam
 
     def update_offset(self, tracking_point, frame_width, frame_height, pixel_dist, real_dist_cm, fov=60.0, focal_length=None):
         """计算头部中心相对于相机光轴的物理偏移量 (单位: cm)"""

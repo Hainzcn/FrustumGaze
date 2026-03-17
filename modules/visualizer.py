@@ -44,7 +44,7 @@ class Visualizer:
                roi_info=None, 
                eye_points=None, 
                raw_eye_points=None, 
-               tracker=None, 
+               gaze_result=None, 
                fps=0.0, 
                gaze_data=None,
                hand_result=None,
@@ -67,17 +67,15 @@ class Visualizer:
         self._draw_roi(frame, roi_info, using_full_scan)
 
         # 2. 绘制手部和姿态 (包含手臂连接)
-        # 获取头部距离以过滤背景干扰手部
-        head_dist = tracker.current_estimated_dist if tracker else 0.0
+        head_dist = gaze_result.estimated_dist if gaze_result else 0.0
         self.draw_hands(frame, hand_result, pose_result, hands_pos, closest_hand, head_dist_cm=head_dist)
         
         # 3. 绘制虹膜中心点
         if eye_points:
              self._draw_iris(frame, eye_points, raw_eye_points)
 
-        # 4. 更新并绘制视线向量 (需要完整的 gaze_data 和 tracker)
-        if gaze_data and tracker and eye_points:
-            # 确保 gaze_data 包含必要的相机参数
+        # 4. 更新并绘制视线向量
+        if gaze_data and gaze_result and eye_points:
             if 'cam_matrix' in gaze_data and gaze_data['cam_matrix'] is not None:
                 self._update_gaze_viz_with_tracker(
                     gaze_data['rvec'], 
@@ -85,13 +83,13 @@ class Visualizer:
                     eye_points, 
                     gaze_data['cam_matrix'], 
                     gaze_data['dist_coeffs'], 
-                    tracker, 
+                    gaze_result, 
                     rmat=gaze_data.get('rmat')
                 )
             
         # 5. 绘制叠加层信息 (FPS, 丢包率, 头部位置文本等)
-        if tracker:
-             self._draw_overlay(frame, tracker, fps, drop_rate, p99_latency)
+        if gaze_result:
+             self._draw_overlay(frame, gaze_result, fps, drop_rate, p99_latency)
 
         # 6. 显示最终画面
         cv2.imshow('FrustumGaze', frame)
@@ -275,9 +273,9 @@ class Visualizer:
             cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1)
             cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1)
 
-    def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, tracker, rmat=None):
+    def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, gaze_result, rmat=None):
         """
-        根据追踪器输出的视线向量更新可视化缓存数据。
+        根据 GazeResult 输出的视线向量更新可视化缓存数据。
         计算视线在相机空间的方向、与虚拟屏幕的交点，并投影至 2D 画面。
         """
         if len(eye_points) < 2:
@@ -287,11 +285,11 @@ class Visualizer:
         right_iris_2d = eye_points[1]
         
         # 1. 计算双眼视线向量及眼球中心
-        l_gaze_vec, l_eye_center_cam = tracker.calculate_single_eye_gaze(
-            left_iris_2d, LEFT_EYE_CENTER_MODEL, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS, rmat=rmat
+        l_gaze_vec, l_eye_center_cam = gaze_result.calculate_single_eye_gaze(
+            left_iris_2d, LEFT_EYE_CENTER_MODEL, cam_matrix, eye_radius=EYE_RADIUS, rmat=rmat
         )
-        r_gaze_vec, r_eye_center_cam = tracker.calculate_single_eye_gaze(
-            right_iris_2d, RIGHT_EYE_CENTER_MODEL, tvec, cam_matrix, dist_coeffs, eye_radius=EYE_RADIUS, rmat=rmat
+        r_gaze_vec, r_eye_center_cam = gaze_result.calculate_single_eye_gaze(
+            right_iris_2d, RIGHT_EYE_CENTER_MODEL, cam_matrix, eye_radius=EYE_RADIUS, rmat=rmat
         )
         
         # 2. 计算视线与虚拟屏幕平面 (Z=0) 的交点
@@ -338,7 +336,7 @@ class Visualizer:
             self.cached_viz_data['text'] = "Gaze on Screen: N/A"
             self.cached_viz_data['text_color'] = (0, 0, 255)
 
-    def _draw_overlay(self, frame, tracker, fps, drop_rate=0.0, p99_latency=0.0):
+    def _draw_overlay(self, frame, gaze_result, fps, drop_rate=0.0, p99_latency=0.0):
         """在画面上叠加绘制统计信息、视线线段和中心参考准星。"""
         h, w = frame.shape[:2]
         
@@ -361,21 +359,18 @@ class Visualizer:
         cv2.putText(frame, info_text, (10, 25), self.FONT, self.FONT_SCALE_INFO, drop_color, self.FONT_THICKNESS)
         
         # 4. 绘制面部/头部追踪详情
-        if tracker.current_pixel_dist > 0:
-            if tracker.current_estimated_dist > 200:
+        if gaze_result.pixel_dist > 0:
+            if gaze_result.estimated_dist > 200:
                 head_text = "Too far!"
             else:
-                head_text = f"PD: {int(tracker.current_pixel_dist)}px | Head: X:{int(tracker.current_offset_x)} Y:{int(tracker.current_offset_y)} Z:{int(tracker.current_estimated_dist)} cm"
+                head_text = f"PD: {int(gaze_result.pixel_dist)}px | Head: X:{int(gaze_result.offset_x)} Y:{int(gaze_result.offset_y)} Z:{int(gaze_result.estimated_dist)} cm"
             cv2.putText(frame, head_text, (10, 50), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), self.FONT_THICKNESS)
             
-            # 显示头部姿态角度 (Euler Angles)
-            if hasattr(tracker, 'current_yaw') and hasattr(tracker, 'current_pitch'):
-                yaw_text = f"Head: Yaw {tracker.current_yaw:.1f} | Pitch {tracker.current_pitch:.1f} deg"
-                cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 0), self.FONT_THICKNESS)
+            yaw_text = f"Head: Yaw {gaze_result.yaw:.1f} | Pitch {gaze_result.pitch:.1f} deg"
+            cv2.putText(frame, yaw_text, (10, 70), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 0), self.FONT_THICKNESS)
 
-            # 显示深度融合技术详情 (ZW:宽度通道 ZL:长度通道 CW:校准宽度)
-            if hasattr(tracker, 'current_depth_details') and tracker.current_depth_details:
-                d = tracker.current_depth_details
+            if gaze_result.depth_details:
+                d = gaze_result.depth_details
                 dual_text = f"ZW:{int(d.get('z_width',0))}({d.get('w_width',0):.2f}) ZL:{int(d.get('z_length',0))}({d.get('w_length',0):.2f}) CW:{d.get('calibrated_width',0):.1f}cm"
                 cv2.putText(frame, dual_text, (10, 90), self.FONT, self.FONT_SCALE_TEXT, (200, 200, 200), self.FONT_THICKNESS)
 
@@ -384,8 +379,8 @@ class Visualizer:
             cv2.putText(frame, self.cached_viz_data['text'], (10, 110), self.FONT, self.FONT_SCALE_TEXT, self.cached_viz_data['text_color'], self.FONT_THICKNESS)
 
         # 6. 绘制头部中心位置标记 (C)
-        if tracker.head_center_pos is not None:
-            dx, dy = tracker.head_center_pos
+        if gaze_result.head_center_pos is not None:
+            dx, dy = gaze_result.head_center_pos
             if 0 <= dx < w and 0 <= dy < h:
                 cv2.circle(frame, (dx, dy), 4, (0, 255, 255), -1)
                 cv2.putText(frame, "C", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)
