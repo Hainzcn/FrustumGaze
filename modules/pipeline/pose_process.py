@@ -18,7 +18,7 @@ class PoseProcessorProcess(BaseProcessorProcess):
             return False
 
         (self.target_w, self.target_h), _, _ = \
-            GlobalImagePreprocessor.calculate_dimensions(self.frame_shape, settings.PREPROCESS_TARGET_HEIGHT)
+            GlobalImagePreprocessor.calculate_dimensions(self.frame_shape, settings.POSE_TARGET_HEIGHT)
         return True
 
     def on_process(self, task, frame):
@@ -26,10 +26,6 @@ class PoseProcessorProcess(BaseProcessorProcess):
 
         resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(self.target_w, self.target_h))
         processed_rgb = GlobalImagePreprocessor.to_rgb(resized_bgr)
-        processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(
-            processed_rgb,
-            kernel_size=settings.PREPROCESS_GAUSSIAN_KERNEL_SIZE,
-            sigma=settings.PREPROCESS_GAUSSIAN_SIGMA)
 
         timestamp_ms = int(time.time() * 1000)
         pose_landmarks_out = []
