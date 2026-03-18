@@ -34,6 +34,9 @@ class FrameProcessorProcess(BaseProcessorProcess):
         camera_model = CameraModel(actual_w, actual_h, self.camera_fov)
         self.cam_matrix = camera_model.cam_matrix
         self.dist_coeffs = camera_model.dist_coeffs
+
+        (self.target_w, self.target_h), _, _ = \
+            GlobalImagePreprocessor.calculate_dimensions(self.frame_shape, settings.PREPROCESS_TARGET_HEIGHT)
         return True
 
     def on_process(self, task, frame):
@@ -46,14 +49,11 @@ class FrameProcessorProcess(BaseProcessorProcess):
 
         # 预处理
         if self.last_landmarks_norm is None:
-            target_h = settings.PREPROCESS_TARGET_HEIGHT
-            (target_w, _), _, _ = GlobalImagePreprocessor.calculate_dimensions(frame.shape, target_h)
-
-            resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(target_w, target_h))
+            resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(self.target_w, self.target_h))
             processed_rgb = GlobalImagePreprocessor.to_rgb(resized_bgr)
             processed_rgb = GlobalImagePreprocessor.apply_clahe(processed_rgb)
 
-            scale = target_h / h
+            scale = self.target_h / h
             roi_info = (0, 0, w, h, scale)
             self.using_full_scan = True
         else:

@@ -16,16 +16,15 @@ class PoseProcessorProcess(BaseProcessorProcess):
         except Exception as e:
             print(f"{self.PROCESS_NAME}: 初始化 PoseTracker 失败: {e}")
             return False
+
+        (self.target_w, self.target_h), _, _ = \
+            GlobalImagePreprocessor.calculate_dimensions(self.frame_shape, settings.PREPROCESS_TARGET_HEIGHT)
         return True
 
     def on_process(self, task, frame):
         frame_id = task['frame_id']
-        h, w = frame.shape[:2]
 
-        (target_w, target_h), _, _ = GlobalImagePreprocessor.calculate_dimensions(
-            frame.shape, settings.PREPROCESS_TARGET_HEIGHT)
-
-        resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(target_w, target_h))
+        resized_bgr = GlobalImagePreprocessor.resize_image(frame, target_size=(self.target_w, self.target_h))
         processed_rgb = GlobalImagePreprocessor.to_rgb(resized_bgr)
         processed_rgb = GlobalImagePreprocessor.apply_gaussian_blur(
             processed_rgb,

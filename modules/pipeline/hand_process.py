@@ -26,27 +26,23 @@ class HandProcessorProcess(BaseProcessorProcess):
             print(f"{self.PROCESS_NAME}: 初始化 HandTracker 失败: {e}")
             return False
 
-        self.cached_dims = (0, 0)
-        self.cached_camera_matrix = None
+        (self.target_w, self.target_h), self.global_scale, _ = \
+            GlobalImagePreprocessor.calculate_dimensions(self.frame_shape, settings.PREPROCESS_TARGET_HEIGHT)
+        self.aspect_ratio = self.frame_shape[1] / float(self.frame_shape[0])
+
+        focal_length = (self.target_w / 2.0) / math.tan(math.radians(self.fov) / 2.0)
+        center = (self.target_w / 2.0, self.target_h / 2.0)
+        self.camera_matrix = np.array(
+            [[focal_length, 0, center[0]],
+             [0, focal_length, center[1]],
+             [0, 0, 1]], dtype="double"
+        )
         return True
 
     def on_process(self, task, frame):
         frame_id = task['frame_id']
         h, w = frame.shape[:2]
-        aspect_ratio = w / float(h)
-
-        (target_w, target_h), global_scale, _ = GlobalImagePreprocessor.calculate_dimensions(
-            frame.shape, settings.PREPROCESS_TARGET_HEIGHT)
-
-        if (target_w, target_h) != self.cached_dims:
-            focal_length = (target_w / 2.0) / math.tan(math.radians(self.fov) / 2.0)
-            center = (target_w / 2.0, target_h / 2.0)
-            self.cached_camera_matrix = np.array(
-                [[focal_length, 0, center[0]],
-                 [0, focal_length, center[1]],
-                 [0, 0, 1]], dtype="double"
-            )
-            self.cached_dims = (target_w, target_h)
+        target_w, target_h = self.target_w, self.target_h
 
         timestamp_ms = int(time.time() * 1000)
 
@@ -158,16 +154,16 @@ class HandProcessorProcess(BaseProcessorProcess):
 
                 x, y, z, w_norm, yaw, pitch, motion_score, grip_factor, depth_details = \
                     self.tracker.calculate_hand_pos(
-                        landmarks, target_w, target_h, aspect_ratio,
+                        landmarks, target_w, target_h, self.aspect_ratio,
                         timestamp=timestamp_ms / 1000.0,
-                        camera_matrix=self.cached_camera_matrix,
+                        camera_matrix=self.camera_matrix,
                         hand_label=label,
                         frame_id=frame_id
                     )
 
                 if x is not None:
                     is_pinching, px, py, pz, pinch_cx, pinch_cy = \
-                        self.tracker.detect_pinch(landmarks, z, aspect_ratio)
+                        self.tracker.detect_pinch(landmarks, z, self.aspect_ratio)
 
                     hand_info = {
                         'id': idx, 'label': label,
