@@ -312,7 +312,7 @@ class WebcamVideoStream:
     负责从摄像头读取帧，支持多线程读取以提高性能，
     并支持写入共享内存以供多进程使用。
     """
-    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_arrays=None):
+    def __init__(self, src=0, width=1920, height=1080, api_preference=cv2.CAP_ANY, queue_size=2, exposure=-5.0, shm_arrays=None, existing_stream=None):
         self.src = src
         self.width = width
         self.height = height
@@ -321,8 +321,11 @@ class WebcamVideoStream:
         self.shm_arrays = shm_arrays # 共享内存数组列表
         self.triple_buffer_idx = None # 三缓冲原子索引 (multiprocessing.Value)
         
-        # 初始化摄像头
-        self.stream = cv2.VideoCapture(self.src, self.api_preference)
+        # 初始化摄像头（优先复用已打开的句柄，避免 USB 重新初始化）
+        if existing_stream is not None and existing_stream.isOpened():
+            self.stream = existing_stream
+        else:
+            self.stream = cv2.VideoCapture(self.src, self.api_preference)
         
         # 优化配置
         # 1. 强制 MJPEG 压缩 (提高帧率)
@@ -454,34 +457,47 @@ class WebcamVideoStream:
 
 def select_camera_device(config_manager):
     """
-    选择摄像头设备。
-    逻辑优化：
-    1. 使用 ffmpeg 获取 DirectShow 设备列表及其 ID (与 OpenCV 索引一致)。
-    2. 如果有 'last_camera_id' 且在列表中找到匹配项，直接返回。
-    3. 如果没有记录或无法匹配，进行扫描并列出设备供用户选择。
-    4. 自动关联 ID，无需用户手动确认物理设备。
+    选择摄像头设备，并返回已打开的 cap 句柄。
+    返回 (camera_index, fov, cap, api_used)。失败时返回 (None, 60.0, None, None)。
+    调用方接管 cap 的生命周期——整个初始化流程只需 open 一次摄像头。
     """
     last_id = config_manager.get_last_camera()
     should_scan = config_manager.should_scan_new_cameras()
 
-    def _try_open_index(camera_index):
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-        if not cap.isOpened():
+    def _get_api_candidates(device_id=None):
+        candidates = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        if device_id:
+            info = config_manager.get_camera_info(device_id)
+            if info and "api_backend" in info:
+                saved_api = int(info["api_backend"])
+                if saved_api in candidates:
+                    candidates.remove(saved_api)
+                candidates.insert(0, saved_api)
+        return candidates
+
+    def _try_open_index(camera_index, api_candidates=None):
+        """尝试打开摄像头。成功返回 (cap, api_used)，失败返回 (None, None)。
+        调用方负责在不再需要时 release cap。"""
+        if api_candidates is None:
+            api_candidates = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        for api in api_candidates:
+            cap = cv2.VideoCapture(camera_index, api)
+            if cap.isOpened():
+                return cap, api
             cap.release()
-            cap = cv2.VideoCapture(camera_index, cv2.CAP_ANY)
-        opened = cap.isOpened()
-        cap.release()
-        return opened
+        return None, None
 
     if not should_scan and last_id:
         saved_info = config_manager.get_camera_info(last_id)
         if saved_info and "last_index" in saved_info:
             try:
                 cached_index = int(saved_info["last_index"])
-                if _try_open_index(cached_index):
+                cap, api_used = _try_open_index(cached_index, _get_api_candidates(last_id))
+                if cap is not None:
                     default_fov = saved_info.get("fov", 60.0)
-                    print(f"快速启动：使用缓存索引 {cached_index} 直连上次设备。")
-                    return cached_index, default_fov
+                    config_manager.update_camera(last_id, api_backend=api_used, last_index=cached_index)
+                    print(f"快速启动：使用缓存索引 {cached_index} 直连上次设备。(API: {api_used})")
+                    return cached_index, default_fov, cap, api_used
                 print(f"缓存索引 {cached_index} 无法打开，回退到设备映射匹配。")
             except (TypeError, ValueError):
                 pass
@@ -508,66 +524,57 @@ def select_camera_device(config_manager):
     if not should_scan and last_id:
         target_index = None
         
-        # 遍历 dshow_map 查找 ID 匹配的索引
         for idx, info in dshow_map.items():
-            # 尝试完全匹配 ID
             if info['id'] == last_id:
                 target_index = idx
                 print(f"快速启动：匹配到设备 '{info['name']}' (索引 {idx})")
                 break
-            
-            # 尝试部分匹配 (例如 last_id 是具体的 InstanceId，而 dshow 提取的是 generic ID)
-            # 或者反过来
             if last_id in info['id'] or info['id'] in last_id:
-                 target_index = idx
-                 print(f"快速启动：模糊匹配到设备 '{info['name']}' (索引 {idx})")
-                 break
+                target_index = idx
+                print(f"快速启动：模糊匹配到设备 '{info['name']}' (索引 {idx})")
+                break
 
         if target_index is not None:
-             # 验证可用性
-             if _try_open_index(target_index):
-                 # 更新 last_index 以备后用
-                 config_manager.update_camera(last_id, last_index=target_index)
-                 
-                 saved_info = config_manager.get_camera_info(last_id)
-                 default_fov = saved_info['fov'] if saved_info else 60.0
-                 return target_index, default_fov
-             else:
-                 print("上次使用的设备无法打开，转入扫描模式。")
+            cap, api_used = _try_open_index(target_index, _get_api_candidates(last_id))
+            if cap is not None:
+                config_manager.update_camera(last_id, api_backend=api_used, last_index=target_index)
+                saved_info = config_manager.get_camera_info(last_id)
+                default_fov = saved_info['fov'] if saved_info else 60.0
+                return target_index, default_fov, cap, api_used
+            else:
+                print("上次使用的设备无法打开，转入扫描模式。")
         else:
-             print("无法定位上次使用的设备 ID，转入扫描模式。")
+            print("无法定位上次使用的设备 ID，转入扫描模式。")
 
-    # 策略 2: 扫描模式
+    # 策略 2: 扫描模式 (探测阶段必须逐个 open/close，仅选定后的最终 cap 保持打开)
     print("正在扫描摄像头设备...")
-    
-    # 如果 dshow_map 为空 (ffmpeg 失败)，回退到简单的索引扫描
     available_indices = []
     
     if dshow_map:
         print("检测到以下 DirectShow 设备:")
         for idx, info in dshow_map.items():
-            # 验证是否真能打开
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            if cap.isOpened():
+            probe = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if probe.isOpened():
                 available_indices.append(idx)
-                cap.release()
                 print(f" [{idx}] {info['name']} (ID: {info['id']})")
             else:
                 print(f" [x] {info['name']} (无法打开)")
+            probe.release()
     else:
-        # 回退逻辑
         print("警告: 无法获取设备名称映射，仅显示可用索引。")
         for i in range(6):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if not cap.isOpened(): cap = cv2.VideoCapture(i, cv2.CAP_ANY)
-            if cap.isOpened():
+            probe = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if not probe.isOpened():
+                probe.release()
+                probe = cv2.VideoCapture(i, cv2.CAP_ANY)
+            if probe.isOpened():
                 available_indices.append(i)
-                cap.release()
                 print(f" [{i}] Camera {i}")
+            probe.release()
 
     if not available_indices:
         print("错误：未检测到任何可用摄像头。")
-        return None, 60.0
+        return None, 60.0, None, None
 
     # 用户选择
     selected_index = None
@@ -587,7 +594,7 @@ def select_camera_device(config_manager):
                 print("请输入数字。")
 
     # 自动保存配置 (使用 dshow_map 中的 ID)
-    selected_dev_id = str(selected_index) # 默认回退
+    selected_dev_id = str(selected_index)
     selected_dev_name = f"Camera {selected_index}"
     
     if dshow_map and selected_index in dshow_map:
@@ -595,16 +602,21 @@ def select_camera_device(config_manager):
         selected_dev_id = info['id']
         selected_dev_name = info['name']
         print(f"已关联设备 ID: {selected_dev_id}")
-    
-    # 更新配置
+
+    # 打开选中的摄像头 (使用完整 API 候选列表，这是最终保持打开的句柄)
+    cap, api_used = _try_open_index(selected_index, _get_api_candidates(selected_dev_id))
+    if cap is None:
+        print("错误：无法打开选中的摄像头。")
+        return None, 60.0, None, None
+
     config_manager.update_camera(
         selected_dev_id, 
         name=selected_dev_name, 
+        api_backend=api_used,
         last_index=selected_index
     )
     config_manager.set_last_camera(selected_dev_id)
     
-    # 扫描完成标志重置
     if should_scan:
         config_manager.set_scan_new_cameras(False)
 
@@ -614,7 +626,7 @@ def select_camera_device(config_manager):
     
     if saved_info and saved_info.get("user_configured", False):
         print(f"加载已保存配置：FOV {default_fov}°")
-        return selected_index, default_fov
+        return selected_index, default_fov, cap, api_used
     
     while True:
         try:
@@ -622,7 +634,7 @@ def select_camera_device(config_manager):
             fov_val = float(val) if val else default_fov
             if 0 < fov_val < 180:
                 config_manager.update_camera(selected_dev_id, fov=fov_val, user_configured=True)
-                return selected_index, fov_val
+                return selected_index, fov_val, cap, api_used
             print("FOV 必须在 0-180 之间。")
         except ValueError:
             print("请输入数字。")
@@ -630,12 +642,12 @@ def select_camera_device(config_manager):
 def select_resolution(cap, camera_index, config_manager):
     """
     选择分辨率。
-    优化逻辑：优先使用配置文件中的分辨率，避免重新扫描导致的变焦和延迟。
+    优化逻辑：
+    1. 已保存分辨率验证通过 → 直接返回，零次扫描。
+    2. 扫描从高到低，命中第一个即 break，减少不必要的 set() 调用。
+    3. 将摄像头当前默认分辨率也纳入候选，避免遗漏非标准但可用的分辨率。
     """
-    # 尝试获取当前选中的设备 ID (由 select_camera_device 设置)
     device_id = config_manager.get_last_camera()
-    
-    # 如果未找到 ID (例如用户跳过关联)，则回退到使用索引作为临时 ID
     if not device_id:
         device_id = str(camera_index)
 
@@ -655,9 +667,11 @@ def select_resolution(cap, camera_index, config_manager):
             return int(w), int(h)
         print(f"已保存分辨率 {w}x{h} 应用失败，当前为 {actual_w}x{actual_h}，将回退扫描。")
 
-    # 2. 扫描支持的分辨率 (仅在首次配置时执行)
-    print("正在扫描摄像头支持的分辨率（可能会有机械变焦声）...")
-    # 从高到低尝试
+    # 记录当前默认分辨率 (仅 get，不触发机械动作)
+    default_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    default_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    print("正在扫描摄像头支持的最高分辨率...")
     candidates = [
         (3840, 2160), # 4K
         (2560, 1440), # 2K
@@ -666,27 +680,37 @@ def select_resolution(cap, camera_index, config_manager):
         (800, 600),   # SVGA
         (640, 480)    # VGA
     ]
-    available = []
-    
-    current_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    current_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # 从高到低扫描，命中第一个可用分辨率后立即停止
+    highest = None
     for w, h in candidates:
         ok, _, _ = _try_set_resolution(w, h)
         if ok:
-            available.append((w, h))
-            
-    # 恢复默认分辨率以免影响后续
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, current_w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, current_h)
+            highest = (w, h)
+            break
+
+    # 构建去重候选列表: [最高可用, 当前默认 (如不同)]
+    available = []
+    if highest:
+        available.append(highest)
+    if default_w > 0 and default_h > 0 and (default_w, default_h) not in available:
+        available.append((default_w, default_h))
 
     if not available:
-        print("未能检测到标准分辨率，将使用默认值。")
-        return current_w, current_h
-        
+        print("未能检测到可用分辨率，将使用默认值。")
+        return default_w, default_h
+
+    if len(available) == 1:
+        res = available[0]
+        print(f"自动选择分辨率: {res[0]}x{res[1]}")
+        config_manager.update_camera(device_id, resolution=res)
+        _try_set_resolution(res[0], res[1])
+        return res
+
     print("请选择分辨率：")
     for i, (w, h) in enumerate(available):
-        print(f" {i}: {w}x{h}")
+        tag = " (最高)" if (w, h) == highest else " (默认)"
+        print(f" {i}: {w}x{h}{tag}")
         
     while True:
         try:
@@ -695,6 +719,7 @@ def select_resolution(cap, camera_index, config_manager):
             if 0 <= idx < len(available):
                 res = available[idx]
                 config_manager.update_camera(device_id, resolution=res)
+                _try_set_resolution(res[0], res[1])
                 return res
             print("无效编号。")
         except ValueError:

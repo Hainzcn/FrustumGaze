@@ -123,16 +123,12 @@ class FrustumGazePipeline:
     def setup(self):
         """
         初始化摄像头并设置分辨率。
-        包括：
-        1. 选择摄像头设备和视场角。
-        2. 尝试不同的 OpenCV 后端 API 以确保兼容性。
-        3. 设置摄像头分辨率和曝光值。
-        4. 启动视频流并创建共享内存。
-        5. 初始化相机模型。
+        整个流程只 open 一次摄像头——select_camera_device 返回已打开的 cap 句柄，
+        经 select_resolution 设置分辨率后直接交给 WebcamVideoStream 接管。
         """
         self.stopped = False
-        # 1. 摄像头选择
-        self.camera_index, self.camera_fov = select_camera_device(self.config_manager)
+        # 1. 摄像头选择 (包含 API 后端自动测试，返回已打开的 cap 句柄)
+        self.camera_index, self.camera_fov, cap, used_api = select_camera_device(self.config_manager)
         if self.camera_index is None:
             print("未选择摄像头，退出。")
             return False
@@ -140,39 +136,13 @@ class FrustumGazePipeline:
         if not self.camera_device_id:
             self.camera_device_id = str(self.camera_index)
 
-        # 2. 尝试不同的 OpenCV 后端 API
-        cap_temp = None
-        used_api = cv2.CAP_ANY
-        api_candidates = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-        
+        # 2. 预设 MJPG 编码后再扫描分辨率，确保扫描结果与最终使用的编码格式一致
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        target_w, target_h = select_resolution(cap, self.camera_index, self.config_manager)
+
+        # 3. 获取并设置曝光配置
         camera_info = self.config_manager.get_camera_info(self.camera_device_id)
-        if camera_info and "api_backend" in camera_info:
-            saved_api = int(camera_info["api_backend"])
-            print(f"检测到上次成功使用的 API: {saved_api}，将优先尝试。")
-            if saved_api in api_candidates:
-                api_candidates.remove(saved_api)
-            api_candidates.insert(0, saved_api)
-
-        for api in api_candidates:
-            print(f"尝试 API: {api} ...")
-            cap_temp = cv2.VideoCapture(self.camera_index, api)
-            if cap_temp.isOpened():
-                print(f"成功使用 API: {api}")
-                used_api = api
-                self.config_manager.update_camera(self.camera_device_id, api_backend=used_api, last_index=self.camera_index)
-                break
-            else:
-                print(f"API {api} 初始化失败。")
-
-        if not cap_temp or not cap_temp.isOpened():
-            print(f"错误: 无法打开摄像头 {self.camera_index}")
-            return False
-
-        # 3. 设置摄像头分辨率
-        target_w, target_h = select_resolution(cap_temp, self.camera_index, self.config_manager)
-
-        # 4. 获取并设置曝光配置
-        exposure_val = -5.0 # 默认曝光值
+        exposure_val = -5.0
         if camera_info and "exposure" in camera_info:
             exposure_val = float(camera_info["exposure"])
             print(f"检测到已保存的曝光配置: {exposure_val}")
@@ -180,9 +150,7 @@ class FrustumGazePipeline:
             print(f"使用默认曝光值: {exposure_val}")
             self.config_manager.update_camera(self.camera_device_id, exposure=exposure_val, last_index=self.camera_index)
 
-        cap_temp.release() # 释放临时捕获对象
-
-        # 5. 启动优化视频流 (独立线程)
+        # 4. 启动优化视频流 (传递已打开的 cap 句柄，整个流程只 open 一次摄像头)
         print(f"正在启动优化视频流 (MJPEG, 独立线程)...")
         print(f"目标分辨率: {target_w}x{target_h}")
         
@@ -191,7 +159,8 @@ class FrustumGazePipeline:
             width=target_w, 
             height=target_h, 
             api_preference=used_api, 
-            exposure=exposure_val
+            exposure=exposure_val,
+            existing_stream=cap
         ).start()
 
         # 自适应等待首帧，避免固定 1s 阻塞启动
@@ -202,7 +171,7 @@ class FrustumGazePipeline:
                 break
             time.sleep(0.01)
 
-        # 6. 读取实际分辨率并创建共享内存
+        # 5. 读取实际分辨率并创建共享内存
         actual_w = self.video_stream.get(cv2.CAP_PROP_FRAME_WIDTH)
         actual_h = self.video_stream.get(cv2.CAP_PROP_FRAME_HEIGHT)
         print(f"摄像头最终实际分辨率: {int(actual_w)}x{int(actual_h)}")
@@ -228,7 +197,7 @@ class FrustumGazePipeline:
         
         self.video_stream.set_shared_memory(self.shm_arrays, self.triple_buffer_idx)
 
-        # 7. 相机模型初始化 (用于姿态和深度计算)
+        # 6. 相机模型初始化 (用于姿态和深度计算)
         self.camera_model = CameraModel(actual_w, actual_h, self.camera_fov)
         self.gaze_data_container['cam_matrix'] = self.camera_model.cam_matrix
         self.gaze_data_container['dist_coeffs'] = self.camera_model.dist_coeffs

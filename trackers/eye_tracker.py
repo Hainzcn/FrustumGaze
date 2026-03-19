@@ -153,10 +153,16 @@ class EyeTracker:
             abs(pitch) < self.calibration_config['min_valid_pitch'] and z_length > 0):
             alpha = self.calibration_config['width_correction_alpha']
             est_width = (z_length * d_width_px) / (focal_length * cos_yaw)
-            self.calibrated_width_cm = (1 - alpha) * self.calibrated_width_cm + alpha * est_width
+            deviation = abs(est_width - self.calibrated_width_cm) / self.calibrated_width_cm if self.calibrated_width_cm > 0 else 0
+            if deviation < self.calibration_config['max_deviation_ratio']:
+                self.calibrated_width_cm = (1 - alpha) * self.calibrated_width_cm + alpha * est_width
+            ref = settings.FACE_REF_WIDTH_CM
+            clamp = self.calibration_config['clamp_ratio']
+            self.calibrated_width_cm = max(ref * (1 - clamp), min(ref * (1 + clamp), self.calibrated_width_cm))
 
         # 4. 融合深度
-        w_width, w_length = math.pow(cos_yaw, 4), math.pow(cos_pitch, 4)
+        power = self.calibration_config.get('weight_power', 2)
+        w_width, w_length = math.pow(cos_yaw, power), math.pow(cos_pitch, power)
         total_w = w_width + w_length
         est_dist = (z_width * w_width + z_length * w_length) / total_w if total_w > 0 else self.current_estimated_dist
 

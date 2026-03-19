@@ -9,11 +9,11 @@ PRINT_UDP_DATA = True # 设为 True 时，在终端打印 UDP 发送的数据
 # Tracking Intervals (每多少帧处理一次)
 # 设置为 1 表示每一帧都处理
 EYE_TRACKING_INTERVAL = 1
-HAND_TRACKING_INTERVAL = 1 # 手部追踪频率 (每多少帧进行一次手部检测)
-POSE_TRACKING_INTERVAL = 6 # 姿态追踪频率 (每多少帧进行一次姿态检测)
-EYE_GAZE_CALCULATION_INTERVAL = 3 # 视线解算频率 (每多少帧进行一次视线解算与绘制)
-GAZE_RENDER_INTERVAL = 3 # 视线线段渲染频率 (每多少帧更新一次)
-FULL_SCAN_INTERVAL = 6 # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
+HAND_TRACKING_INTERVAL = 1          # 手部追踪频率 (每多少帧进行一次手部检测，TODO: 手动设置为 1 时，无法识别手部)
+POSE_TRACKING_INTERVAL = 6          # 姿态追踪频率 (每多少帧进行一次姿态检测)
+EYE_GAZE_CALCULATION_INTERVAL = 3   # 视线解算频率 (每多少帧进行一次视线解算与绘制)
+GAZE_RENDER_INTERVAL = 3            # 视线线段渲染频率 (每多少帧更新一次)
+FULL_SCAN_INTERVAL = 6              # 全图扫描频率 (每多少帧进行一次全图扫描，如果 ROI 丢失)
 
 # 滤波器参数配置 (Hierarchical Filter Configuration)
 FILTER_CONFIG = {
@@ -114,7 +114,10 @@ FILTER_CONFIG = {
         'CALIBRATION': {
             'width_correction_alpha': 0.05, # 校准平滑系数
             'min_valid_yaw': 15.0, # 校准时的最大偏航角
-            'min_valid_pitch': 15.0 # 校准时的最大俯仰角
+            'min_valid_pitch': 15.0, # 校准时的最大俯仰角
+            'max_deviation_ratio': 0.2, # 单帧异常值拒绝阈值 (偏离当前校准值 20% 以上则跳过)
+            'clamp_ratio': 0.3, # 校准值相对参考值最大漂移比例 (+-30%)
+            'weight_power': 2, # 深度融合权重幂次 (cos^n, 降低可减少姿态敏感度)
         }
     }
 }
@@ -134,10 +137,10 @@ RIGHT_IRIS = [473, 474, 475, 476, 477]
 # 用于构建 solvePnP 的 3D 模型点
 
 # Face Constants
-FACE_REF_LENGTH_CM = 8.0  # 眉心到鼻尖的垂直距离 (参考值)
+FACE_REF_LENGTH_CM = 7.0  # 眉心到鼻尖的垂直距离 (参考值)
 FACE_REF_WIDTH_CM = 9.0   # 双眼外眼角间距 (参考值)
 FACE_REF_MOUTH_WIDTH_CM = 5.0 # 嘴角间距 (参考值)
-FACE_REF_MOUTH_DOWN_CM = 4.0 # 鼻尖到嘴角的垂直距离 (参考值)
+FACE_REF_MOUTH_DOWN_CM = 3.5 # 鼻尖到嘴角的垂直距离 (参考值)
 
 # --- Derived Model Points (Do Not Edit Directly) ---
 # 3D Coordinate System (Unit: cm):
