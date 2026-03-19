@@ -3,8 +3,9 @@ import time
 import math
 import numpy as np
 from dataclasses import dataclass, field
-from utils.math_utils import OneEuroFilter, OneDKalmanFilter
+from utils.math_utils import OneEuroFilter, OneDKalmanFilter, calculate_screen_intersection, calculate_weighted_average
 import config.settings as settings
+from config.settings import EYE_RADIUS
 
 """
 眼部与头部追踪计算模块。
@@ -34,20 +35,14 @@ class GazeResult:
     raw_eye_points: list = field(default_factory=list)
     calibrated_width: float = 0.0
 
-    def calculate_single_eye_gaze(self, iris_center_2d, eye_center_model_3d, cam_matrix, eye_radius=60.0, rmat=None):
-        """计算单眼的 3D 视线向量 (近似模型)"""
-        p_iris = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
-        ray = np.dot(np.linalg.inv(cam_matrix), p_iris)
-        ray /= np.linalg.norm(ray)
-
-        z = self.estimated_dist
-        iris_cam = ray * (z / ray[2]) if ray[2] != 0 else ray * z
-
-        T = np.array([self.offset_x, self.offset_y, self.estimated_dist])
-        eye_center_cam = np.dot(rmat, eye_center_model_3d) + T
-
-        gaze = iris_cam - eye_center_cam
-        return gaze / np.linalg.norm(gaze), eye_center_cam
+    left_gaze_vec: np.ndarray = None
+    right_gaze_vec: np.ndarray = None
+    left_eye_center_cam: np.ndarray = None
+    right_eye_center_cam: np.ndarray = None
+    screen_point: tuple = None
+    left_confidence: float = 0.0
+    right_confidence: float = 0.0
+    rmat: np.ndarray = None
 
 
 class EyeTracker:
@@ -174,11 +169,106 @@ class EyeTracker:
         z_cfg = settings.FILTER_CONFIG['FACE'].get('Z_VAL', settings.FILTER_CONFIG['FACE']['DISTANCE'])
         return self._get_filter('face_z_val', est_dist, timestamp, **z_cfg)
 
-    def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov, cam_matrix, dist_coeffs, should_calc_gaze=True):
-        """综合处理面部关键点，输出位置、姿态及眼部数据"""
+    @staticmethod
+    def _build_rmat(yaw_deg, pitch_deg):
+        """从头部欧拉角构建 Ry @ Rx 旋转矩阵"""
+        y_rad = np.radians(yaw_deg)
+        p_rad = np.radians(pitch_deg)
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(p_rad), -np.sin(p_rad)],
+            [0, np.sin(p_rad),  np.cos(p_rad)]
+        ])
+        Ry = np.array([
+            [ np.cos(y_rad), 0, np.sin(y_rad)],
+            [0,              1, 0             ],
+            [-np.sin(y_rad), 0, np.cos(y_rad)]
+        ])
+        return Ry @ Rx
+
+    @staticmethod
+    def _compute_single_eye_gaze(iris_center_2d, eye_center_2d,
+                                 cam_matrix, estimated_dist, eye_radius):
+        """
+        射线-球面求交法计算单眼视线向量。
+
+        1. 从眼角 landmark 中点推算眼球中心 3D 位置 (球心)
+        2. 虹膜射线与眼球球面求交, 得到虹膜表面 3D 点
+        3. 视线 = normalize(iris_3d - eye_center)
+        """
+        cam_inv = np.linalg.inv(cam_matrix)
+
+        # --- 眼球中心 3D: landmark 中点投影到 z=D, 再沿视线后退 r ---
+        p_eye = np.array([eye_center_2d[0], eye_center_2d[1], 1.0])
+        eye_dir = cam_inv @ p_eye
+        eye_dir /= np.linalg.norm(eye_dir)
+        eye_surface = eye_dir * (estimated_dist / eye_dir[2])
+        C = eye_surface + eye_dir * eye_radius
+
+        # --- 虹膜射线 ---
+        p_iris = np.array([iris_center_2d[0], iris_center_2d[1], 1.0])
+        d = cam_inv @ p_iris
+        d /= np.linalg.norm(d)
+
+        # --- 射线-球面求交: |t*d - C|^2 = r^2 ---
+        oc = -C
+        half_b = np.dot(d, oc)
+        c_val = np.dot(oc, oc) - eye_radius * eye_radius
+        discriminant = half_b * half_b - c_val
+
+        if discriminant >= 0:
+            sqrt_disc = np.sqrt(discriminant)
+            t_front = -half_b - sqrt_disc
+            if t_front <= 0:
+                t_front = -half_b + sqrt_disc
+            iris_3d = d * t_front
+        else:
+            t_closest = np.dot(d, C)
+            iris_3d = d * t_closest
+
+        gaze = iris_3d - C
+        norm_val = np.linalg.norm(gaze)
+        if norm_val > 0:
+            gaze /= norm_val
+        return gaze, C
+
+    @staticmethod
+    def _compute_eye_confidence(yaw_deg, eye_blink_score, is_left):
+        """
+        计算单眼追踪置信度，融合几何可见性与眼睑开合度。
+        yaw > 0 时左眼更可见，yaw < 0 时右眼更可见。
+        """
+        k = settings.GAZE_CONFIDENCE_YAW_SENSITIVITY
+        min_conf = settings.GAZE_CONFIDENCE_MIN
+        yaw_rad = math.radians(yaw_deg)
+
+        sign = 1.0 if is_left else -1.0
+        geo = max(min_conf, min(1.0, 0.5 + k * sign * math.sin(yaw_rad)))
+
+        openness = max(0.0, 1.0 - eye_blink_score)
+        return geo * openness
+
+    @staticmethod
+    def _compute_screen_gaze(l_gaze, l_eye_cam, l_conf,
+                             r_gaze, r_eye_cam, r_conf):
+        """
+        计算双眼视线射线与屏幕平面 (Z=0) 的交点，按置信度加权求最终注视点。
+        """
+        l_point = calculate_screen_intersection(l_eye_cam, l_gaze) if l_gaze is not None else None
+        r_point = calculate_screen_intersection(r_eye_cam, r_gaze) if r_gaze is not None else None
+
+        avg = calculate_weighted_average(l_point, r_point, w1=l_conf, w2=r_conf)
+        if avg is not None:
+            return (float(avg[0]), float(avg[1]))
+        return None
+
+    def process_landmarks(self, face_landmarks, frame_width, frame_height, camera_fov,
+                          cam_matrix, dist_coeffs, should_calc_gaze=True,
+                          eye_blink_left=0.0, eye_blink_right=0.0):
+        """综合处理面部关键点，输出位置、姿态、视线向量及屏幕注视点"""
         w, h, ts = frame_width, frame_height, time.time()
         focal_length = cam_matrix[0, 0] if cam_matrix is not None else (w / 2.0) / math.tan(math.radians(camera_fov) / 2.0)
-        
+
         # 1. 虹膜处理
         eye_pts, raw_eye_pts = [], []
         if should_calc_gaze:
@@ -198,18 +288,69 @@ class EyeTracker:
         self.current_pixel_dist = (focal_length * self.calibrated_width_cm) / self.current_estimated_dist if self.current_estimated_dist > 0 else 0
 
         # 4. 中心追踪点确定
-        center_p = self._extract_landmark_point(face_landmarks, 168, w, h) # 眉心点
+        center_p = self._extract_landmark_point(face_landmarks, 168, w, h)
         if center_p:
             track_p = (self._get_filter('head_center_x', center_p[0], ts), self._get_filter('head_center_y', center_p[1], ts))
         else:
-            # 回退方案：使用右眼内角与外角中点
             il, ir = self._extract_landmark_point(face_landmarks, 133, w, h), self._extract_landmark_point(face_landmarks, 362, w, h)
             track_p = ((il[0]+ir[0])/2.0, (il[1]+ir[1])/2.0) if il and ir else None
 
         # 5. 更新物理偏移
         if track_p:
             self.update_offset(track_p, w, h, self.current_pixel_dist, self.current_estimated_dist, focal_length=focal_length)
-        
+
+        # 6. 视线解算 (仅在 should_calc_gaze 且虹膜可用时执行)
+        l_gaze_vec = r_gaze_vec = None
+        l_eye_cam = r_eye_cam = None
+        screen_pt = None
+        l_conf = r_conf = 0.0
+        rmat = None
+
+        if should_calc_gaze and len(eye_pts) == 2 and self.current_estimated_dist > 0:
+            rmat = self._build_rmat(self.current_yaw, self.current_pitch)
+
+            # 提取并滤波左右眼角 landmark → 眼球中心 2D
+            outer_l = self._extract_landmark_point(face_landmarks, 33, w, h)
+            inner_l = self._extract_landmark_point(face_landmarks, 133, w, h)
+            outer_r = self._extract_landmark_point(face_landmarks, 263, w, h)
+            inner_r = self._extract_landmark_point(face_landmarks, 362, w, h)
+
+            iris_cfg = settings.FILTER_CONFIG['FACE']['IRIS']
+            if outer_l and inner_l:
+                f_ol = (self._get_filter('gaze_ol_x', outer_l[0], ts, **iris_cfg),
+                        self._get_filter('gaze_ol_y', outer_l[1], ts, **iris_cfg))
+                f_il = (self._get_filter('gaze_il_x', inner_l[0], ts, **iris_cfg),
+                        self._get_filter('gaze_il_y', inner_l[1], ts, **iris_cfg))
+                l_eye_center_2d = ((f_ol[0] + f_il[0]) / 2.0, (f_ol[1] + f_il[1]) / 2.0)
+            else:
+                l_eye_center_2d = eye_pts[0]
+
+            if outer_r and inner_r:
+                f_or = (self._get_filter('gaze_or_x', outer_r[0], ts, **iris_cfg),
+                        self._get_filter('gaze_or_y', outer_r[1], ts, **iris_cfg))
+                f_ir = (self._get_filter('gaze_ir_x', inner_r[0], ts, **iris_cfg),
+                        self._get_filter('gaze_ir_y', inner_r[1], ts, **iris_cfg))
+                r_eye_center_2d = ((f_or[0] + f_ir[0]) / 2.0, (f_or[1] + f_ir[1]) / 2.0)
+            else:
+                r_eye_center_2d = eye_pts[1]
+
+            l_gaze_vec, l_eye_cam = self._compute_single_eye_gaze(
+                eye_pts[0], l_eye_center_2d, cam_matrix,
+                self.current_estimated_dist, EYE_RADIUS
+            )
+            r_gaze_vec, r_eye_cam = self._compute_single_eye_gaze(
+                eye_pts[1], r_eye_center_2d, cam_matrix,
+                self.current_estimated_dist, EYE_RADIUS
+            )
+
+            l_conf = self._compute_eye_confidence(self.current_yaw, eye_blink_left, is_left=True)
+            r_conf = self._compute_eye_confidence(self.current_yaw, eye_blink_right, is_left=False)
+
+            screen_pt = self._compute_screen_gaze(
+                l_gaze_vec, l_eye_cam, l_conf,
+                r_gaze_vec, r_eye_cam, r_conf
+            )
+
         return GazeResult(
             estimated_dist=self.current_estimated_dist,
             offset_x=self.current_offset_x,
@@ -223,6 +364,14 @@ class EyeTracker:
             eye_points=eye_pts,
             raw_eye_points=raw_eye_pts,
             calibrated_width=self.calibrated_width_cm,
+            left_gaze_vec=l_gaze_vec,
+            right_gaze_vec=r_gaze_vec,
+            left_eye_center_cam=l_eye_cam,
+            right_eye_center_cam=r_eye_cam,
+            screen_point=screen_pt,
+            left_confidence=l_conf,
+            right_confidence=r_conf,
+            rmat=rmat,
         )
 
     def _calculate_face_normal_pose(self, face_landmarks, w, h):

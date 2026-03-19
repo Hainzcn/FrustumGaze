@@ -6,8 +6,7 @@
 
 import cv2
 import numpy as np
-from config.settings import LEFT_EYE_CENTER_MODEL, RIGHT_EYE_CENTER_MODEL, EYE_RADIUS, AXIS_LENGTH, GAZE_RENDER_INTERVAL
-from utils.math_utils import calculate_screen_intersection, calculate_weighted_average
+from config.settings import EYE_RADIUS, AXIS_LENGTH, GAZE_RENDER_INTERVAL
 
 class Visualizer:
     """
@@ -273,64 +272,83 @@ class Visualizer:
             cv2.circle(frame, (int(cx_left), int(cy_left)), 2, (0, 0, 255), -1)
             cv2.circle(frame, (int(cx_right), int(cy_right)), 2, (0, 0, 255), -1)
 
+    @staticmethod
+    def _draw_transparent_line(frame, pt1, pt2, color, thickness, alpha):
+        """在 frame 上绘制半透明线段，仅对线段 bounding box 区域做 overlay 混合。"""
+        h, w = frame.shape[:2]
+        pad = thickness + 1
+        x1 = max(0, min(pt1[0], pt2[0]) - pad)
+        y1 = max(0, min(pt1[1], pt2[1]) - pad)
+        x2 = min(w, max(pt1[0], pt2[0]) + pad)
+        y2 = min(h, max(pt1[1], pt2[1]) + pad)
+        if x2 <= x1 or y2 <= y1:
+            return
+        roi = frame[y1:y2, x1:x2]
+        overlay = roi.copy()
+        offset = (-x1, -y1)
+        cv2.line(overlay, (pt1[0] + offset[0], pt1[1] + offset[1]),
+                 (pt2[0] + offset[0], pt2[1] + offset[1]), color, thickness)
+        cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0, roi)
+
     def _update_gaze_viz_with_tracker(self, rvec, tvec, eye_points, cam_matrix, dist_coeffs, gaze_result, rmat=None):
         """
-        根据 GazeResult 输出的视线向量更新可视化缓存数据。
-        计算视线在相机空间的方向、与虚拟屏幕的交点，并投影至 2D 画面。
+        使用 GazeResult 中预计算的视线向量更新可视化缓存数据。
+        通过 3D->2D 透视投影保留视线方向的纵深感。
         """
         if len(eye_points) < 2:
             return
-            
-        left_iris_2d = eye_points[0]
-        right_iris_2d = eye_points[1]
-        
-        # 1. 计算双眼视线向量及眼球中心
-        l_gaze_vec, l_eye_center_cam = gaze_result.calculate_single_eye_gaze(
-            left_iris_2d, LEFT_EYE_CENTER_MODEL, cam_matrix, eye_radius=EYE_RADIUS, rmat=rmat
-        )
-        r_gaze_vec, r_eye_center_cam = gaze_result.calculate_single_eye_gaze(
-            right_iris_2d, RIGHT_EYE_CENTER_MODEL, cam_matrix, eye_radius=EYE_RADIUS, rmat=rmat
-        )
-        
-        # 2. 计算视线与虚拟屏幕平面 (Z=0) 的交点
-        l_screen_point = calculate_screen_intersection(l_eye_center_cam, l_gaze_vec)
-        r_screen_point = calculate_screen_intersection(r_eye_center_cam, r_gaze_vec)
-        
-        # 3. 双眼交点加权平均，得到最终屏幕注视点
-        avg_screen_point = calculate_weighted_average(l_screen_point, r_screen_point)
-        
-        # 4. 准备 2D 投影线段
-        # 起点设为虹膜在球面上的位置
-        l_start_3d = l_eye_center_cam + l_gaze_vec
-        r_start_3d = r_eye_center_cam + r_gaze_vec
-        
-        # 终点沿视线方向延伸
-        l_end_3d = l_start_3d + l_gaze_vec * (AXIS_LENGTH / 60.0)
-        r_end_3d = r_start_3d + r_gaze_vec * (AXIS_LENGTH / 60.0)
 
-        # 执行 3D -> 2D 投影
+        l_gaze_vec = gaze_result.left_gaze_vec
+        r_gaze_vec = gaze_result.right_gaze_vec
+        l_eye_center_cam = gaze_result.left_eye_center_cam
+        r_eye_center_cam = gaze_result.right_eye_center_cam
+
+        if l_gaze_vec is None or r_gaze_vec is None:
+            return
+
+        l_start_3d = l_eye_center_cam + l_gaze_vec * EYE_RADIUS
+        r_start_3d = r_eye_center_cam + r_gaze_vec * EYE_RADIUS
+        l_end_3d = l_start_3d + l_gaze_vec * AXIS_LENGTH
+        r_end_3d = r_start_3d + r_gaze_vec * AXIS_LENGTH
+
         points_to_project = np.array([l_start_3d, l_end_3d, r_start_3d, r_end_3d])
-        projected_points, _ = cv2.projectPoints(points_to_project, np.zeros((3,1)), np.zeros((3,1)), cam_matrix, dist_coeffs)
-        
-        # 5. 优化：线段起点对齐到 2D 关键点，消除投影与检测间的微小偏差
+        projected_points, _ = cv2.projectPoints(
+            points_to_project, np.zeros((3, 1)), np.zeros((3, 1)), cam_matrix, dist_coeffs
+        )
+
         l_p_start, l_p_end = projected_points[0][0], projected_points[1][0]
         r_p_start, r_p_end = projected_points[2][0], projected_points[3][0]
-        
-        l_vec, r_vec = l_p_end - l_p_start, r_p_end - r_p_start
-        
-        # 以真实 2D 虹膜坐标为起点更新缓存
-        l_real_start, r_real_start = np.array(eye_points[0]), np.array(eye_points[1])
-        l_final_end, r_final_end = l_real_start + l_vec, r_real_start + r_vec
-        
+
+        GAZE_MIN_PX, GAZE_MAX_PX = 20, 120
+
+        l_real_start = np.array(eye_points[0])
+        r_real_start = np.array(eye_points[1])
+
+        l_dir = l_p_end - l_p_start
+        r_dir = r_p_end - r_p_start
+        l_mag = np.linalg.norm(l_dir)
+        r_mag = np.linalg.norm(r_dir)
+
+        if l_mag > 0:
+            clamped_l = max(GAZE_MIN_PX, min(GAZE_MAX_PX, l_mag))
+            l_dir = l_dir / l_mag * clamped_l
+        if r_mag > 0:
+            clamped_r = max(GAZE_MIN_PX, min(GAZE_MAX_PX, r_mag))
+            r_dir = r_dir / r_mag * clamped_r
+
+        l_final_end = l_real_start + l_dir
+        r_final_end = r_real_start + r_dir
+
         self.cached_viz_data['l_start'] = (int(l_real_start[0]), int(l_real_start[1]))
         self.cached_viz_data['l_end'] = (int(l_final_end[0]), int(l_final_end[1]))
         self.cached_viz_data['r_start'] = (int(r_real_start[0]), int(r_real_start[1]))
         self.cached_viz_data['r_end'] = (int(r_final_end[0]), int(r_final_end[1]))
-        
-        # 更新屏幕交点坐标文本
-        if avg_screen_point is not None:
-            ix_cm, iy_cm = avg_screen_point[0] / 50.0, avg_screen_point[1] / 50.0
-            self.cached_viz_data['text'] = f"Gaze on Screen: X:{int(ix_cm)} Y:{int(iy_cm)} cm"
+
+        sp = gaze_result.screen_point
+        lc = gaze_result.left_confidence
+        rc = gaze_result.right_confidence
+        if sp is not None:
+            self.cached_viz_data['text'] = f"Gaze: X:{sp[0]:.1f} Y:{sp[1]:.1f} cm | Conf L:{lc:.0%} R:{rc:.0%}"
             self.cached_viz_data['text_color'] = (255, 0, 255)
         else:
             self.cached_viz_data['text'] = "Gaze on Screen: N/A"
@@ -340,10 +358,10 @@ class Visualizer:
         """在画面上叠加绘制统计信息、视线线段和中心参考准星。"""
         h, w = frame.shape[:2]
         
-        # 1. 绘制视线线段 (使用缓存数据，平滑视觉抖动)
+        # 1. 绘制视线向量 (半透明蓝色线段, ROI 级 overlay 混合)
         if self.cached_viz_data['l_start'] is not None:
-            cv2.line(frame, self.cached_viz_data['l_start'], self.cached_viz_data['l_end'], (255, 0, 0), 2)
-            cv2.line(frame, self.cached_viz_data['r_start'], self.cached_viz_data['r_end'], (255, 0, 0), 2)
+            self._draw_transparent_line(frame, self.cached_viz_data['l_start'], self.cached_viz_data['l_end'], (255, 0, 0), 2, 0.45)
+            self._draw_transparent_line(frame, self.cached_viz_data['r_start'], self.cached_viz_data['r_end'], (255, 0, 0), 2, 0.45)
 
         # 2. 绘制光轴中心十字准星
         center_x, center_y = w // 2, h // 2

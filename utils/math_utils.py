@@ -83,13 +83,13 @@ class Simple3DKalmanFilter:
 
     def update(self, x, y, z, R_z=None):
         if R_z is not None:
-            # 只更新 Z 轴的观测噪声，并确保类型为 float32
             self.kalman.measurementNoiseCov[2, 2] = np.float32(R_z)
             
         measurement = np.array([[np.float32(x)], [np.float32(y)], [np.float32(z)]])
+        self.kalman.predict()
         self.kalman.correct(measurement)
-        prediction = self.kalman.predict()
-        return prediction[0][0], prediction[1][0], prediction[2][0]
+        state = self.kalman.statePost
+        return state[0][0], state[1][0], state[2][0]
 
 class OneDKalmanFilter:
     def __init__(self, Q=1e-5, R=0.01):

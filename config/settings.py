@@ -172,6 +172,10 @@ EYE_RADIUS = 1.2
 # Screen Projection Axis Length (10cm)
 AXIS_LENGTH = 10.0
 
+# Gaze Confidence Parameters
+GAZE_CONFIDENCE_YAW_SENSITIVITY = 0.4   # yaw 对单眼几何可见性权重的影响系数
+GAZE_CONFIDENCE_MIN = 0.1               # 单眼最低置信度下限 (防止权重为 0)
+
 # --- Physical Constants (Unit: cm / meters as specified) ---
 
 # Eye Distance Constants (cm)

@@ -475,33 +475,18 @@ class FrustumGazePipeline:
                     self.latest_eye_points = gaze.eye_points
                     self.latest_raw_eye_points = gaze.raw_eye_points
                     
-                    # 构建平移向量与旋转矩阵 (可视化 + UDP)
-                    tvec = np.array([[gaze.offset_x], [gaze.offset_y], [gaze.estimated_dist]])
-                    
-                    y_rad = np.radians(gaze.yaw)
-                    p_rad = np.radians(gaze.pitch)
-                    
-                    Rx = np.array([
-                        [1, 0, 0],
-                        [0, np.cos(p_rad), -np.sin(p_rad)],
-                        [0, np.sin(p_rad), np.cos(p_rad)]
-                    ])
-                    Ry = np.array([
-                        [np.cos(y_rad), 0, np.sin(y_rad)],
-                        [0, 1, 0],
-                        [-np.sin(y_rad), 0, np.cos(y_rad)]
-                    ])
-                    rmat = Ry @ Rx
-                    
-                    if VISUALIZE:
+                    if VISUALIZE and gaze.rmat is not None:
+                        tvec = np.array([[gaze.offset_x], [gaze.offset_y], [gaze.estimated_dist]])
+                        rvec, _ = cv2.Rodrigues(gaze.rmat)
                         self.gaze_data_container['tvec'] = tvec
-                        self.gaze_data_container['rmat'] = rmat
-                        rvec, _ = cv2.Rodrigues(rmat)
+                        self.gaze_data_container['rmat'] = gaze.rmat
                         self.gaze_data_container['rvec'] = rvec
                         self.latest_gaze_data = self.gaze_data_container
                     
                     try:
-                        data_str = f"G:{gaze.estimated_dist:.2f},{gaze.offset_x:.2f},{gaze.offset_y:.2f}"
+                        sp = gaze.screen_point
+                        sx, sy = (sp[0], sp[1]) if sp else (0.0, 0.0)
+                        data_str = f"G:{gaze.estimated_dist:.2f},{gaze.offset_x:.2f},{gaze.offset_y:.2f},{sx:.2f},{sy:.2f}"
                         self.udp_sender.send(data_str)
                     except Exception as e:
                         print(f"UDP 发送错误: {e}")

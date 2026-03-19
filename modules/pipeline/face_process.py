@@ -82,11 +82,13 @@ class FrameProcessorProcess(BaseProcessorProcess):
         result_lite = None
         gaze_result = None
 
+        blendshapes = getattr(detection_result, 'face_blendshapes', None)
+
         if self.using_full_scan and detection_result.face_landmarks:
-            result_lite = FaceDetectionResultLite([])
+            result_lite = FaceDetectionResultLite([], blendshapes)
             self.tracker.reset()
         elif not self.using_full_scan and detection_result.face_landmarks:
-            result_lite = FaceDetectionResultLite(detection_result.face_landmarks)
+            result_lite = FaceDetectionResultLite(detection_result.face_landmarks, blendshapes)
 
             should_calc_gaze = (frame_id % settings.EYE_GAZE_CALCULATION_INTERVAL == 0)
             face_landmarks = detection_result.face_landmarks[0]
@@ -94,7 +96,9 @@ class FrameProcessorProcess(BaseProcessorProcess):
             gaze_result = self.tracker.process_landmarks(
                 face_landmarks, w, h, self.camera_fov,
                 self.cam_matrix, self.dist_coeffs,
-                should_calc_gaze=should_calc_gaze
+                should_calc_gaze=should_calc_gaze,
+                eye_blink_left=result_lite.eye_blink_left,
+                eye_blink_right=result_lite.eye_blink_right
             )
         else:
             self.tracker.reset()
