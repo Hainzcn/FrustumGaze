@@ -70,6 +70,7 @@ class HandTracker:
             'depth_anchor': {'value': 0.0, 'frame_id': 0, 'timestamp': 0.0},
             'width_correction': {'value': 1.0, 'count': 0},
             'grip_state': {'value': 0.0},
+            'pinch_debounce': {'raw': False, 'confirmed': False, 'count': 0},
             'landmarks': {} # 关键点的 OneEuroFilter 字典
         }
 
@@ -189,32 +190,36 @@ class HandTracker:
         return ([landmarks_list[i] for i in keep_indices], 
                 [handedness_list[i] for i in keep_indices])
 
-    def detect_pinch(self, landmarks, z_depth, aspect_ratio):
+    def _detect_pinch_raw(self, filtered_lms, z_depth, aspect_ratio):
         """
-        检测拇指是否与其他手指尖捏合。
+        使用滤波后的关键点检测拇指是否与其他手指尖捏合 (3D 距离判定)。
+        返回 (raw_pinch, pinch_center_x, pinch_center_y)，坐标为归一化值。
         """
         THUMB_TIP = 4
-        TIPS = [8, 12, 16, 20] # 食指、中指、无名指、小指尖
-        
-        thumb = landmarks[THUMB_TIP]
+        TIPS = [8, 12, 16, 20]
+
+        thumb = filtered_lms[THUMB_TIP]
         tan_half_fov = math.tan(math.radians(self.fov) / 2.0)
         pinching_fingers = []
-        
+
         for tip_idx in TIPS:
-            finger = landmarks[tip_idx]
+            if tip_idx not in filtered_lms:
+                continue
+            finger = filtered_lms[tip_idx]
             dx_m = (thumb.x - finger.x) * z_depth * 2.0 * tan_half_fov
             dy_m = (thumb.y - finger.y) * z_depth * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
-            
-            if math.sqrt(dx_m**2 + dy_m**2) < settings.PINCH_THRESHOLD_M:
+            dz_m = (thumb.z - finger.z) * z_depth * 2.0 * tan_half_fov
+
+            if math.sqrt(dx_m**2 + dy_m**2 + dz_m**2) < settings.PINCH_THRESHOLD_M:
                 pinching_fingers.append(finger)
-        
+
         if pinching_fingers:
             sum_x = thumb.x + sum(f.x for f in pinching_fingers)
             sum_y = thumb.y + sum(f.y for f in pinching_fingers)
             count = 1 + len(pinching_fingers)
-            return True, 0.0, 0.0, 0.0, sum_x / count, sum_y / count
-            
-        return False, 0.0, 0.0, 0.0, 0.0, 0.0
+            return True, sum_x / count, sum_y / count
+
+        return False, 0.0, 0.0
 
     def _get_filtered_landmark(self, landmarks, idx, timestamp, filter_dict):
         """对单个关键点应用 OneEuro 滤波"""
@@ -377,8 +382,35 @@ class HandTracker:
         if pos_filter:
             r_dynamic = settings.FILTER_CONFIG['HAND']['POSITION']['measurement_noise'] + grip_factor * settings.FILTER_CONFIG['HAND']['POSITION']['r_grip_max'] * (1.0 - motion_score)
             x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est, R_z=r_dynamic)
-            
+
+        # 6. 捏合检测 (使用滤波后的关键点)
+        for tip_idx in [4, 8, 12, 16, 20]:
+            get_pt(tip_idx)
+        raw_pinch, pinch_cx, pinch_cy = self._detect_pinch_raw(filtered_lms, z_est, aspect_ratio)
+
+        debounce = state.get('pinch_debounce')
+        if debounce is not None:
+            if raw_pinch == debounce['confirmed']:
+                debounce['count'] = 0
+            else:
+                debounce['count'] += 1
+                if debounce['count'] >= settings.PINCH_DEBOUNCE_FRAMES:
+                    debounce['confirmed'] = raw_pinch
+                    debounce['count'] = 0
+            debounce['raw'] = raw_pinch
+            is_pinching = debounce['confirmed']
+        else:
+            is_pinching = raw_pinch
+
+        px, py, pz = 0.0, 0.0, 0.0
+        if is_pinching and pinch_cx > 0 and pinch_cy > 0:
+            px = (pinch_cx * frame_width - cx) * z_est / focal_length
+            py = (pinch_cy * frame_height - cy) * z_est / focal_length
+            pz = z_est
+
+        pinch_result = (is_pinching, px, py, pz, pinch_cx, pinch_cy)
+
         return x_est, y_est, z_est, np.linalg.norm(p17 - p5), yaw_deg, pitch_deg, motion_score, grip_factor, {
             'z_up': z_up, 'z_across': z_across, 'w_up': w_up / (w_up + w_across), 'w_across': w_across / (w_up + w_across), 'len_corr': len_corr
-        }
+        }, pinch_result
 

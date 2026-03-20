@@ -152,7 +152,7 @@ class HandProcessorProcess(BaseProcessorProcess):
                     if categories:
                         label = categories[0]['label']
 
-                x, y, z, w_norm, yaw, pitch, motion_score, grip_factor, depth_details = \
+                x, y, z, w_norm, yaw, pitch, motion_score, grip_factor, depth_details, pinch_result = \
                     self.tracker.calculate_hand_pos(
                         landmarks, target_w, target_h, self.aspect_ratio,
                         timestamp=timestamp_ms / 1000.0,
@@ -162,8 +162,7 @@ class HandProcessorProcess(BaseProcessorProcess):
                     )
 
                 if x is not None:
-                    is_pinching, px, py, pz, pinch_cx, pinch_cy = \
-                        self.tracker.detect_pinch(landmarks, z, self.aspect_ratio)
+                    is_pinching, px, py, pz, pinch_cx, pinch_cy = pinch_result
 
                     hand_info = {
                         'id': idx, 'label': label,

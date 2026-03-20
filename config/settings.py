@@ -9,7 +9,7 @@ PRINT_UDP_DATA = True # 设为 True 时，在终端打印 UDP 发送的数据
 # Tracking Intervals (每多少帧处理一次)
 # 设置为 1 表示每一帧都处理
 EYE_TRACKING_INTERVAL = 1
-HAND_TRACKING_INTERVAL = 1          # 手部追踪频率 (每多少帧进行一次手部检测，TODO: 手动设置为 1 时，无法识别手部)
+HAND_TRACKING_INTERVAL = 1          # 手部追踪频率 (每多少帧进行一次手部检测)
 POSE_TRACKING_INTERVAL = 6          # 姿态追踪频率 (每多少帧进行一次姿态检测)
 EYE_GAZE_CALCULATION_INTERVAL = 3   # 视线解算频率 (每多少帧进行一次视线解算与绘制)
 GAZE_RENDER_INTERVAL = 3            # 视线线段渲染频率 (每多少帧更新一次)
@@ -137,7 +137,7 @@ RIGHT_IRIS = [473, 474, 475, 476, 477]
 # 用于构建 solvePnP 的 3D 模型点
 
 # Face Constants
-FACE_REF_LENGTH_CM = 7.0  # 眉心到鼻尖的垂直距离 (参考值)
+FACE_REF_LENGTH_CM = 6.0  # 眉心到鼻尖的垂直距离 (参考值)
 FACE_REF_WIDTH_CM = 9.0   # 双眼外眼角间距 (参考值)
 FACE_REF_MOUTH_WIDTH_CM = 5.0 # 嘴角间距 (参考值)
 FACE_REF_MOUTH_DOWN_CM = 3.5 # 鼻尖到嘴角的垂直距离 (参考值)
@@ -190,7 +190,8 @@ OUTER_EYE_DIST_CM = FACE_REF_WIDTH_CM
 # Hand Constants
 HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.
 HAND_REF_WIDTH_M = 0.06 # Reference width (Index MCP to Pinky MCP) for depth estimation. 6cm.
-PINCH_THRESHOLD_M = 0.02  # 2cm threshold for pinch detection
+PINCH_THRESHOLD_M = 0.04  # 4cm threshold for pinch detection
+PINCH_DEBOUNCE_FRAMES = 3  # 捏合状态去抖帧数 (连续 N 帧确认才切换)
 
 # --- Tracking Confidence Thresholds ---
 
