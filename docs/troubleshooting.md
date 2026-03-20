@@ -43,5 +43,15 @@
 **现象**: 报错 `RuntimeError: Failed to load model...`
 
 **解决方案**:
-*   确认 `models/` 目录下是否存在 `.task` 文件。
+*   确认 `models/` 目录下是否存在 `.task` 文件（`face_landmarker.task`、`hand_landmarker.task`、`pose_landmarker.task`）。
 *   确认 `config/settings.py` 中的路径配置是否正确指向了模型文件。
+
+## 6. 画面右下角没有 CPU/GPU 资源信息
+
+**现象**: 程序运行正常，但画面右下角没有显示 CPU、内存、GPU 占用信息。
+
+**说明**: 资源监控功能依赖可选库 `psutil`（CPU/内存）和 `GPUtil`（NVIDIA GPU）。如果未安装，程序会自动跳过资源监控，**不会报错**，也不影响核心追踪功能。
+
+**解决方案**:
+*   安装可选依赖即可启用：`pip install psutil GPUtil`
+*   `GPUtil` 仅支持 NVIDIA 显卡。AMD 显卡或无独立显卡的机器不会显示 GPU 信息，CPU/内存信息仍可正常显示。

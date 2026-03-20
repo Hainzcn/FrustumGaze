@@ -29,13 +29,18 @@
     ```
     *如果没有 requirements.txt，请手动安装核心依赖:*
     ```bash
-    pip install opencv-python mediapipe numpy
+    pip install opencv-python mediapipe numpy numba
+    ```
+    *可选依赖（资源监控显示，未安装时自动跳过）:*
+    ```bash
+    pip install psutil GPUtil
     ```
 
 4.  **模型文件准备**
     确保 `models/` 目录下包含以下文件：
     *   `face_landmarker.task`
     *   `hand_landmarker.task`
+    *   `pose_landmarker.task`
     
     *如果缺失，请从 Google MediaPipe 官方仓库下载对应的 Task 文件。*
 

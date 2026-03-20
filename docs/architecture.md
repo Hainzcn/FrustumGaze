@@ -15,7 +15,7 @@ FrustumGaze 采用多进程架构设计，旨在解决 Python 在处理高分辨
 ```mermaid
 graph TD
     Camera[摄像头输入] -->|Capture| Main[主进程 (Pipeline)]
-    Main -->|写入| SharedMem[共享内存 (Double Buffer)]
+    Main -->|写入| SharedMem[共享内存 (Triple Buffer)]
     
     subgraph "主进程 (Main)"
         Main -->|Visualizer| Display[屏幕显示]
@@ -50,8 +50,8 @@ graph TD
 1.  **初始化 (`setup`)**:
     *   自动选择最佳摄像头 API (DSHOW, MSMF 等)。
     *   配置摄像头参数（分辨率、曝光、FPS）。
-    *   申请双缓冲共享内存 (`SharedMemory`)。
-    *   初始化网络发送模块 (`UDPSender`) 和可视化模块 (`Visualizer`)。
+    *   申请三缓冲共享内存 (`SharedMemory`)。
+    *   初始化网络发送模块 (`UDPSender`)、可视化模块 (`Visualizer`) 和性能统计管理器 (`StatsManager`)。
 2.  **进程管理 (`start_processes`, `stop`)**:
     *   创建并启动 `FrameProcessorProcess` (人脸), `HandProcessorProcess`, `PoseProcessorProcess`。
     *   处理优雅退出，确保释放所有资源（摄像头、共享内存、子进程）。
@@ -67,14 +67,14 @@ graph TD
 
 为了在进程间高效传输 1080p+ 的图像数据，系统使用了 `multiprocessing.shared_memory`。
 
-*   **双缓冲 (Double Buffering)**: 创建两个共享内存块 (`frustum_gaze_frame_buffer_0`, `_1`)。
-    *   主进程写入 Buffer A 时，子进程可能正在读取 Buffer B，反之亦然。
+*   **三缓冲 (Triple Buffering)**: 创建三个共享内存块 (`frustum_gaze_frame_buffer_{session}_{0,1,2}`)。
+    *   主进程维护一个原子索引 `triple_buffer_idx`，始终写入非最新的 buffer，读端从最新 buffer 读取，天然避免读写冲突。
     *   通过 Buffer Index 在队列中传递当前帧所在的内存块索引。
 *   **Zero-Copy**: 子进程直接通过 `numpy.ndarray` 映射访问共享内存，无需数据拷贝，极大降低了延迟。
 
 ### 2.3 追踪进程与逻辑 (`modules/pipeline/` & `trackers/`)
 
-所有追踪逻辑封装在独立的子进程中，通过继承 `multiprocessing.Process` 实现。
+所有追踪逻辑封装在独立的子进程中，均继承自 `BaseProcessorProcess`（`modules/pipeline/base_process.py`）。该基类封装了共享内存连接、主循环、队列交互和生命周期管理，子类只需实现 `on_init()` / `on_process()` / `on_cleanup()` 三个钩子。
 
 #### 2.3.1 人脸追踪进程 (`modules/pipeline/face_process.py`)
 *   **类名**: `FrameProcessorProcess`
@@ -104,12 +104,14 @@ graph TD
     *   **MediaPipe Pose**: 检测身体骨骼关键点。
     *   通常运行频率较低（如每 3-5 帧一次），用于辅助全身姿态估计。
 
-#### 2.3.4 视线算法基类 (`trackers/eye_tracker.py`)
+#### 2.3.4 视线与头部追踪计算 (`trackers/eye_tracker.py`)
 *   **类名**: `EyeTracker`
-*   **功能**: 这是一个数学计算辅助类，而非独立进程。
-    *   **solvePnP**: 利用 2D 人脸关键点和 3D 通用人脸模型，解算头部旋转和平移向量 (rvec, tvec)。
-    *   **数据滤波**: 对关键点坐标和计算出的距离/角度进行多级滤波。
-    *   被 `FaceProcessorProcess` 实例化并调用。
+*   **功能**: 数学计算辅助类，而非独立进程，由 `FaceProcessorProcess` 实例化并调用。
+    *   **头部姿态**: 使用面部法向量法（4 个特征点叉积），直接从法向量分量提取 Yaw/Pitch，再构建旋转矩阵。不使用 solvePnP。
+    *   **头部深度**: 双通道融合（宽度通道 + 长度通道），结合动态校准。
+    *   **视线计算**: 通过相机内参逆矩阵将 2D 眼球/虹膜坐标反投影为 3D 射线，利用射线-球面求交得到视线向量。
+    *   **数据滤波**: 对关键点坐标和计算出的距离/角度进行多级 OneEuro / Kalman 滤波。
+    *   **输出**: `GazeResult` dataclass，包含深度、偏移、姿态、视线向量、置信度、屏幕交点等。
 
 ## 3. 坐标系转换
 
@@ -117,7 +119,7 @@ graph TD
 
 1.  **图像坐标系 (2D)**: 像素单位 (0,0) 到 (Width, Height)。
 2.  **相机坐标系 (3D)**: OpenCV 标准，X 右，Y 下，Z 前。
-3.  **模型坐标系 (3D)**: 用于 solvePnP 的标准化人脸 3D 模型。
+3.  **模型坐标系 (3D)**: 标准化人脸 3D 模型，用于视线几何计算中的眼球中心参考点定义（原点为鼻尖）。
 4.  **Unity 坐标系 (3D)**: 左手坐标系，Y 上，Z 前。
 
 **注意**: Python 端主要输出 **相机坐标系** 下的数据。Unity 接收端脚本 (`Camera/VirtualWindowController.cs`) 负责将其转换为 Unity 世界坐标系。
@@ -129,6 +131,7 @@ graph TD
 3.  **跳帧策略**: 允许配置追踪频率（如每 2 帧追踪一次），中间帧使用插值或卡尔曼滤波预测。
 4.  **Zero-Copy 共享内存**: 消除进程间图像传输的开销。
 5.  **MJPEG 视频流**: 摄像头采集使用 MJPEG 格式，减少 USB 带宽占用，提高帧率。
+6.  **资源监控 (可选)**: `StatsManager` 每秒采样一次进程 CPU / 内存占用（`psutil`）及 GPU 使用率（`GPUtil`），由 `Visualizer` 在画面右下角显示。两个依赖库均为可选，未安装时自动跳过监控，不影响核心功能。
 
 ## 5. 级联滤波策略 (Cascading Filter Strategy)
 
@@ -173,16 +176,16 @@ graph LR
 ```mermaid
 graph LR
     Raw[MediaPipe Raw] -->|L1: Shared OneEuro| Keypoints[平滑关键点]
-    Keypoints -->|L2: PnP Solver| Pose[头部姿态]
-    Keypoints -->|L2: Geometry| Dist[距离估算]
-    Pose -->|L3: OneEuro| SmoothYaw[平滑 Yaw]
+    Keypoints -->|L2: Face Normal| Pose[头部姿态]
+    Keypoints -->|L2: Dual-Channel| Dist[深度估算]
+    Pose -->|L3: OneEuro| SmoothYaw[平滑 Yaw/Pitch]
     Dist -->|L3: Kalman| FinalData[平滑距离/偏移]
 ```
 
-1.  **Level 1 (关键点级)**: 对参与 PnP 解算的 6 个关键点 (眼角、鼻尖等) 以及虹膜中心进行 `OneEuroFilter`。
+1.  **Level 1 (关键点级)**: 对参与姿态和深度解算的 4 个特征点 (外眼角 33/263、下巴 152、眉心 168) 以及虹膜中心进行 `OneEuroFilter`。
 2.  **Level 2 (几何解算)**:
-    *   **PnP**: 解算头部旋转和平移。
-    *   **Distance**: 基于眼间距计算深度。
+    *   **Face Normal**: 面部法向量法解算 Yaw/Pitch 头部姿态。
+    *   **Dual-Channel Distance**: 双通道（宽度 + 长度）融合估算头部深度。
 3.  **Level 3 (数据级)**:
     *   **Yaw**: 对解算出的 Yaw 角进行滤波。
     *   **Distance/Offset**: 使用 `OneDKalmanFilter` 平滑最终输出的距离和屏幕偏移量。
