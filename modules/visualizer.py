@@ -129,8 +129,7 @@ class Visualizer:
             if not hand_pos:
                 continue
                 
-            # 过滤逻辑：若手部距离明显远于头部（Z轴深度），则视为背景干扰并跳过绘制
-            hand_z_cm = hand_pos['z'] * 100
+            hand_z_cm = hand_pos['z']
             if head_dist_cm > 0 and hand_z_cm > (head_dist_cm + 10.0):
                 continue
 
@@ -219,7 +218,7 @@ class Visualizer:
         
         # 1. 基础坐标与状态文本
         pd_val = hand_pos.get('w_norm', 0) * frame.shape[1]
-        text = f"PD:{pd_val:.0f}px X:{hand_pos['x']*100:.0f} Y:{hand_pos['y']*100:.0f} Z:{hand_pos['z']*100:.0f}cm"
+        text = f"PD:{pd_val:.0f}px X:{hand_pos['x']:.0f} Y:{hand_pos['y']:.0f} Z:{hand_pos['z']:.0f}cm"
         if closest_hand and closest_hand['id'] == idx:
             text += " (Closest)"
         cv2.putText(frame, text, (wx, wy + 20), self.FONT, self.FONT_SCALE_TEXT, color, self.FONT_THICKNESS)
@@ -231,8 +230,8 @@ class Visualizer:
         # 3. 深度融合详情 (调试用小字)
         depth_details = hand_pos.get('depth_details', {})
         if depth_details:
-            detail_text_1 = f"Z_UP:{depth_details.get('z_up', 0.0):.2f}m (W:{depth_details.get('w_up', 0.0):.2f})"
-            detail_text_2 = f"Z_AC:{depth_details.get('z_across', 0.0):.2f}m (W:{depth_details.get('w_across', 0.0):.2f})"
+            detail_text_1 = f"Z_UP:{depth_details.get('z_up', 0.0):.1f}cm (W:{depth_details.get('w_up', 0.0):.2f})"
+            detail_text_2 = f"Z_AC:{depth_details.get('z_across', 0.0):.1f}cm (W:{depth_details.get('w_across', 0.0):.2f})"
             detail_text_3 = f"L-Corr:{depth_details.get('len_corr', 1.0):.2f}"
             
             for i, d_text in enumerate([detail_text_1, detail_text_2, detail_text_3]):

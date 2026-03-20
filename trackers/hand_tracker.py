@@ -38,10 +38,21 @@ class HandTracker:
     """
     def __init__(self, fov=60.0):
         self.fov = fov
+        self.tan_half_fov = math.tan(math.radians(fov) / 2.0)
         self.detector = None
         self.roi = None
         self.roi_miss_count = 0
         self.MAX_ROI_MISS_COUNT = 30
+
+        # 缓存常用滤波配置，避免每帧从嵌套 dict 查找
+        hand_cfg = settings.FILTER_CONFIG['HAND']
+        self._kp_config = settings.FILTER_CONFIG['KEYPOINT']
+        self._scale_cfg = hand_cfg['SCALE']
+        self._pos_cfg = hand_cfg['POSITION']
+        self._dist_cfg = hand_cfg['PIXEL_DIST']
+        self._z_cfg = hand_cfg['Z_VAL']
+        self._depth_cfg = hand_cfg['DEPTH']
+
         self._init_mediapipe()
         
         # 初始化手部过滤器状态
@@ -52,19 +63,15 @@ class HandTracker:
 
     def _create_filter_state(self):
         """创建单个手部的滤波和状态跟踪字典"""
-        hand_config = settings.FILTER_CONFIG['HAND']
-        scale_config = hand_config['SCALE']
-        pos_config = hand_config['POSITION']
-        
         return {
             'w_norm': OneEuroFilter(
-                min_cutoff=scale_config['min_cutoff'], 
-                beta=scale_config['beta'],
-                d_cutoff=scale_config['d_cutoff']
+                min_cutoff=self._scale_cfg['min_cutoff'], 
+                beta=self._scale_cfg['beta'],
+                d_cutoff=self._scale_cfg['d_cutoff']
             ),
             'pos': Simple3DKalmanFilter(
-                process_noise=pos_config['process_noise'], 
-                measurement_noise=pos_config['measurement_noise']
+                process_noise=self._pos_cfg['process_noise'], 
+                measurement_noise=self._pos_cfg['measurement_noise']
             ),
             'depth_length_history': [],
             'depth_anchor': {'value': 0.0, 'frame_id': 0, 'timestamp': 0.0},
@@ -199,18 +206,18 @@ class HandTracker:
         TIPS = [8, 12, 16, 20]
 
         thumb = filtered_lms[THUMB_TIP]
-        tan_half_fov = math.tan(math.radians(self.fov) / 2.0)
+        tan_hf = self.tan_half_fov
         pinching_fingers = []
 
         for tip_idx in TIPS:
             if tip_idx not in filtered_lms:
                 continue
             finger = filtered_lms[tip_idx]
-            dx_m = (thumb.x - finger.x) * z_depth * 2.0 * tan_half_fov
-            dy_m = (thumb.y - finger.y) * z_depth * (1.0 / aspect_ratio) * 2.0 * tan_half_fov
-            dz_m = (thumb.z - finger.z) * z_depth * 2.0 * tan_half_fov
+            dx = (thumb.x - finger.x) * z_depth * 2.0 * tan_hf
+            dy = (thumb.y - finger.y) * z_depth * (1.0 / aspect_ratio) * 2.0 * tan_hf
+            dz = (thumb.z - finger.z) * z_depth * 2.0 * tan_hf
 
-            if math.sqrt(dx_m**2 + dy_m**2 + dz_m**2) < settings.PINCH_THRESHOLD_M:
+            if math.sqrt(dx**2 + dy**2 + dz**2) < settings.PINCH_THRESHOLD_CM:
                 pinching_fingers.append(finger)
 
         if pinching_fingers:
@@ -228,12 +235,12 @@ class HandTracker:
             return lm
             
         kx, ky, kz = f"lm_{idx}_x", f"lm_{idx}_y", f"lm_{idx}_z"
-        kp_config = settings.FILTER_CONFIG['KEYPOINT']
+        kp = self._kp_config
         
         if kx not in filter_dict:
-            filter_dict[kx] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
-            filter_dict[ky] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
-            filter_dict[kz] = OneEuroFilter(kp_config['min_cutoff'], kp_config['beta'], kp_config['d_cutoff'])
+            filter_dict[kx] = OneEuroFilter(kp['min_cutoff'], kp['beta'], kp['d_cutoff'])
+            filter_dict[ky] = OneEuroFilter(kp['min_cutoff'], kp['beta'], kp['d_cutoff'])
+            filter_dict[kz] = OneEuroFilter(kp['min_cutoff'], kp['beta'], kp['d_cutoff'])
             
         return LandmarkLite(
             filter_dict[kx].filter(lm.x, timestamp),
@@ -257,13 +264,14 @@ class HandTracker:
         pitch_deg = math.degrees(math.asin(np.clip(-normal[1], -1.0, 1.0)))
         
         if filter_dict is not None and timestamp is not None:
-             # 角度滤波
-             for angle_type, val in [('yaw', yaw_deg), ('pitch', pitch_deg)]:
-                 config = settings.FILTER_CONFIG['HAND'][angle_type.upper()]
-                 if angle_type not in filter_dict:
-                     filter_dict[angle_type] = OneEuroFilter(config['min_cutoff'], config['beta'], config['d_cutoff'])
-                 if angle_type == 'yaw': yaw_deg = filter_dict['yaw'].filter(val, timestamp)
-                 else: pitch_deg = filter_dict['pitch'].filter(val, timestamp)
+             yaw_cfg = settings.FILTER_CONFIG['HAND']['YAW']
+             pitch_cfg = settings.FILTER_CONFIG['HAND']['PITCH']
+             if 'yaw' not in filter_dict:
+                 filter_dict['yaw'] = OneEuroFilter(yaw_cfg['min_cutoff'], yaw_cfg['beta'], yaw_cfg['d_cutoff'])
+             if 'pitch' not in filter_dict:
+                 filter_dict['pitch'] = OneEuroFilter(pitch_cfg['min_cutoff'], pitch_cfg['beta'], pitch_cfg['d_cutoff'])
+             yaw_deg = filter_dict['yaw'].filter(yaw_deg, timestamp)
+             pitch_deg = filter_dict['pitch'].filter(pitch_deg, timestamp)
                  
         return yaw_deg, pitch_deg
 
@@ -279,7 +287,7 @@ class HandTracker:
         grip_factor = np.clip((1.8 - ratio) / (1.8 - 0.9), 0.0, 1.0)
         
         if grip_state is not None:
-            alpha = settings.FILTER_CONFIG['HAND']['DEPTH']['grip_smoothing_alpha']
+            alpha = self._depth_cfg['grip_smoothing_alpha']
             grip_factor = alpha * grip_factor + (1.0 - alpha) * grip_state.get('value', 0.0)
             grip_state['value'] = grip_factor
             
@@ -314,28 +322,28 @@ class HandTracker:
         grip_factor = self._calculate_grip_factor(p0, p9, tips_pts, grip_state)
 
         # 3. 深度估算 (Z)
-        focal_length = camera_matrix[0, 0] if camera_matrix is not None else (frame_width / 2.0) / math.tan(math.radians(self.fov) / 2.0)
+        focal_length = camera_matrix[0, 0] if camera_matrix is not None else (frame_width / 2.0) / self.tan_half_fov
         
         # 2D 距离计算与滤波
         dist_up_2d = np.linalg.norm(p9[:2] - p0[:2])
         dist_across_2d = np.linalg.norm(p17[:2] - p5[:2])
         
         if filter_dict is not None and timestamp is not None:
-            dist_cfg = settings.FILTER_CONFIG['HAND']['PIXEL_DIST']
+            dc = self._dist_cfg
             for k, val in [('dist_up', dist_up_2d), ('dist_across', dist_across_2d)]:
                 if k not in filter_dict:
-                    filter_dict[k] = OneEuroFilter(dist_cfg['min_cutoff'], dist_cfg['beta'], dist_cfg['d_cutoff'])
+                    filter_dict[k] = OneEuroFilter(dc['min_cutoff'], dc['beta'], dc['d_cutoff'])
                 if k == 'dist_up': dist_up_2d = filter_dict[k].filter(val, timestamp)
                 else: dist_across_2d = filter_dict[k].filter(val, timestamp)
 
-        # 几何深度估计
+        # 几何深度估计 (单位: cm)
         cos_pitch, cos_yaw = max(0.2, abs(math.cos(math.radians(pitch_deg)))), max(0.2, abs(math.cos(math.radians(yaw_deg))))
-        z_up_raw = (focal_length * settings.HAND_REF_LENGTH_M * cos_pitch) / (dist_up_2d * frame_width) if dist_up_2d > 1e-4 else 0.5
-        z_across = (focal_length * settings.HAND_REF_WIDTH_M * cos_yaw) / (dist_across_2d * frame_width) if dist_across_2d > 1e-4 else 0.5
+        z_up_raw = (focal_length * settings.HAND_REF_LENGTH_CM * cos_pitch) / (dist_up_2d * frame_width) if dist_up_2d > 1e-4 else 50.0
+        z_across = (focal_length * settings.HAND_REF_WIDTH_CM * cos_yaw) / (dist_across_2d * frame_width) if dist_across_2d > 1e-4 else 50.0
 
         # 宽度修正
         len_corr = width_corr_state.get('value', 1.0) if width_corr_state else 1.0
-        depth_cfg = settings.FILTER_CONFIG['HAND']['DEPTH']
+        depth_cfg = self._depth_cfg
         
         if width_corr_state and depth_history and len(depth_history) >= 2:
             motion_score_tmp = min(max(np.std(depth_history) / (np.mean(depth_history) * depth_cfg['sigma_threshold_ratio']), 0.0), 1.0)
@@ -366,9 +374,9 @@ class HandTracker:
 
         # Z 轴平滑
         if filter_dict is not None and timestamp is not None:
-            z_cfg = settings.FILTER_CONFIG['HAND']['Z_VAL']
+            zc = self._z_cfg
             if 'z_val' not in filter_dict:
-                filter_dict['z_val'] = OneEuroFilter(z_cfg['min_cutoff'], z_cfg['beta'], z_cfg['d_cutoff'])
+                filter_dict['z_val'] = OneEuroFilter(zc['min_cutoff'], zc['beta'], zc['d_cutoff'])
             z_est = filter_dict['z_val'].filter(z_est, timestamp)
 
         # 5. 坐标映射 (2D -> 3D)
@@ -380,7 +388,7 @@ class HandTracker:
         
         # 卡尔曼滤波
         if pos_filter:
-            r_dynamic = settings.FILTER_CONFIG['HAND']['POSITION']['measurement_noise'] + grip_factor * settings.FILTER_CONFIG['HAND']['POSITION']['r_grip_max'] * (1.0 - motion_score)
+            r_dynamic = self._pos_cfg['measurement_noise'] + grip_factor * self._pos_cfg['r_grip_max'] * (1.0 - motion_score)
             x_est, y_est, z_est = pos_filter.update(x_est, y_est, z_est, R_z=r_dynamic)
 
         # 6. 捏合检测 (使用滤波后的关键点)

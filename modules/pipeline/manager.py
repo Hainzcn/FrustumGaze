@@ -5,8 +5,6 @@ import queue
 import multiprocessing
 import sys
 import os
-from collections import deque
-
 from config.settings import VISUALIZE, UDP_IP, UDP_PORT, EYE_TRACKING_INTERVAL, HAND_TRACKING_INTERVAL, POSE_TRACKING_INTERVAL
 from modules.camera import CameraModel, ConfigManager, WebcamVideoStream, select_camera_device, select_resolution
 from modules.network import UDPSender
@@ -397,12 +395,17 @@ class FrustumGazePipeline:
             
             # 如果有最近的手部数据，则通过 UDP 发送
             if self.latest_closest_hand:
-                is_pinching = 1 if self.latest_closest_hand.get('is_pinching', False) else 0 # 捏合状态
-                hx = self.latest_closest_hand.get('x', 0.0) # 手部 X 坐标
-                hy = self.latest_closest_hand.get('y', 0.0) # 手部 Y 坐标
-                hz = self.latest_closest_hand.get('z', 0.0) # 手部 Z 坐标
-                
-                hand_str = f"H:{is_pinching},{hx:.3f},{hy:.3f},{hz:.3f}"
+                is_pinching = 1 if self.latest_closest_hand.get('is_pinching', False) else 0
+                pinch_pos = self.latest_closest_hand.get('pinch_pos', (0.0, 0.0, 0.0))
+
+                if is_pinching and any(v != 0.0 for v in pinch_pos):
+                    hx, hy, hz = pinch_pos
+                else:
+                    hx = self.latest_closest_hand.get('x', 0.0)
+                    hy = self.latest_closest_hand.get('y', 0.0)
+                    hz = self.latest_closest_hand.get('z', 0.0)
+
+                hand_str = f"H:{is_pinching},{hx:.2f},{hy:.2f},{hz:.2f}"
                 self.udp_sender.send(hand_str)
         except queue.Empty:
             pass # 队列为空，无新结果
@@ -446,10 +449,9 @@ class FrustumGazePipeline:
                     
                     if VISUALIZE and gaze.rmat is not None:
                         tvec = np.array([[gaze.offset_x], [gaze.offset_y], [gaze.estimated_dist]])
-                        rvec, _ = cv2.Rodrigues(gaze.rmat)
                         self.gaze_data_container['tvec'] = tvec
                         self.gaze_data_container['rmat'] = gaze.rmat
-                        self.gaze_data_container['rvec'] = rvec
+                        self.gaze_data_container['rvec'] = gaze.rvec
                         self.latest_gaze_data = self.gaze_data_container
                     
                     try:

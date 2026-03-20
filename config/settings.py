@@ -187,10 +187,10 @@ GAZE_CONFIDENCE_MIN = 0.1               # 单眼最低置信度下限 (防止权
 INNER_EYE_DIST_CM = 4.0 # Keep as fallback
 OUTER_EYE_DIST_CM = FACE_REF_WIDTH_CM
 
-# Hand Constants
-HAND_REF_LENGTH_M = 0.09  # Reference length (Wrist to Middle MCP) for depth estimation. 9cm.
-HAND_REF_WIDTH_M = 0.06 # Reference width (Index MCP to Pinky MCP) for depth estimation. 6cm.
-PINCH_THRESHOLD_M = 0.04  # 4cm threshold for pinch detection
+# Hand Constants (cm)
+HAND_REF_LENGTH_CM = 9.0   # Reference length (Wrist to Middle MCP) for depth estimation
+HAND_REF_WIDTH_CM = 6.0    # Reference width (Index MCP to Pinky MCP) for depth estimation
+PINCH_THRESHOLD_CM = 4.0   # Threshold for pinch detection
 PINCH_DEBOUNCE_FRAMES = 3  # 捏合状态去抖帧数 (连续 N 帧确认才切换)
 
 # --- Tracking Confidence Thresholds ---

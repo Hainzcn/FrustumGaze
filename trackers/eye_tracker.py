@@ -43,6 +43,7 @@ class GazeResult:
     left_confidence: float = 0.0
     right_confidence: float = 0.0
     rmat: np.ndarray = None
+    rvec: np.ndarray = None
 
 
 class EyeTracker:
@@ -61,22 +62,28 @@ class EyeTracker:
         self.current_yaw = 0.0
         self.current_pitch = 0.0
         
-        # 二级滤波：对距离和偏移量应用卡尔曼滤波
+        # 缓存常用滤波配置，避免每帧从嵌套 dict 查找
         face_config = settings.FILTER_CONFIG['FACE']
-        dist_cfg = face_config['DISTANCE']
-        off_cfg = face_config['OFFSET']
+        self._kp_config = settings.FILTER_CONFIG['KEYPOINT']
+        self._dist_cfg = face_config['DISTANCE']
+        self._off_cfg = face_config['OFFSET']
+        self._yaw_cfg = face_config['YAW']
+        self._pitch_cfg = face_config.get('PITCH', self._yaw_cfg)
+        self._iris_cfg = face_config['IRIS']
+        self._z_cfg = face_config.get('Z_VAL', self._dist_cfg)
+        self.calibration_config = face_config['CALIBRATION']
 
-        self.pixel_dist_filter = OneDKalmanFilter(Q=dist_cfg['process_noise'], R=dist_cfg['measurement_noise'])
-        self.real_dist_filter = OneDKalmanFilter(Q=dist_cfg['process_noise'], R=dist_cfg['measurement_noise'])
-        self.offset_x_filter = OneDKalmanFilter(Q=off_cfg['process_noise'], R=off_cfg['measurement_noise'])
-        self.offset_y_filter = OneDKalmanFilter(Q=off_cfg['process_noise'], R=off_cfg['measurement_noise'])
+        # 二级滤波：对距离和偏移量应用卡尔曼滤波
+        self.pixel_dist_filter = OneDKalmanFilter(Q=self._dist_cfg['process_noise'], R=self._dist_cfg['measurement_noise'])
+        self.real_dist_filter = OneDKalmanFilter(Q=self._dist_cfg['process_noise'], R=self._dist_cfg['measurement_noise'])
+        self.offset_x_filter = OneDKalmanFilter(Q=self._off_cfg['process_noise'], R=self._off_cfg['measurement_noise'])
+        self.offset_y_filter = OneDKalmanFilter(Q=self._off_cfg['process_noise'], R=self._off_cfg['measurement_noise'])
         
         # 状态追踪
-        self.head_center_pos = None # 头部中心在帧中的像素位置
-        self.calibrated_width_cm = settings.FACE_REF_WIDTH_CM # 动态校准后的面部参考宽度
-        self.calibration_config = settings.FILTER_CONFIG['FACE']['CALIBRATION']
-        self.current_depth_details = {} # 深度融合的调试细节
-        self.filters = {} # OneEuroFilter 缓存字典
+        self.head_center_pos = None
+        self.calibrated_width_cm = settings.FACE_REF_WIDTH_CM
+        self.current_depth_details = {}
+        self.filters = {}
         self.filters_initialized = False
 
     def reset(self):
@@ -91,8 +98,7 @@ class EyeTracker:
         """获取或创建指定名称的 OneEuroFilter 并应用滤波"""
         if name not in self.filters:
             if min_cutoff is None:
-                cfg = settings.FILTER_CONFIG['KEYPOINT']
-                min_cutoff, beta, d_cutoff = cfg['min_cutoff'], cfg['beta'], cfg['d_cutoff']
+                min_cutoff, beta, d_cutoff = self._kp_config['min_cutoff'], self._kp_config['beta'], self._kp_config['d_cutoff']
             self.filters[name] = OneEuroFilter(min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
         return self.filters[name].filter(value, current_time)
 
@@ -109,11 +115,11 @@ class EyeTracker:
         iris_r = self._extract_landmark_point(landmarks, 473, w, h)
         if not iris_l or not iris_r: return None, None, None, None
         
-        cfg = settings.FILTER_CONFIG['FACE']['IRIS']
-        f_iris_l = (self._get_filter('iris_lx', iris_l[0], timestamp, **cfg), 
-                    self._get_filter('iris_ly', iris_l[1], timestamp, **cfg))
-        f_iris_r = (self._get_filter('iris_rx', iris_r[0], timestamp, **cfg), 
-                    self._get_filter('iris_ry', iris_r[1], timestamp, **cfg))
+        ic = self._iris_cfg
+        f_iris_l = (self._get_filter('iris_lx', iris_l[0], timestamp, **ic), 
+                    self._get_filter('iris_ly', iris_l[1], timestamp, **ic))
+        f_iris_r = (self._get_filter('iris_rx', iris_r[0], timestamp, **ic), 
+                    self._get_filter('iris_ry', iris_r[1], timestamp, **ic))
         return iris_l, iris_r, f_iris_l, f_iris_r
 
     def _calculate_depth(self, landmarks, w, h, timestamp, focal_length, yaw, pitch):
@@ -172,8 +178,7 @@ class EyeTracker:
                                      'calibrated_width': self.calibrated_width_cm}
         
         # 5. 最终深度滤波
-        z_cfg = settings.FILTER_CONFIG['FACE'].get('Z_VAL', settings.FILTER_CONFIG['FACE']['DISTANCE'])
-        return self._get_filter('face_z_val', est_dist, timestamp, **z_cfg)
+        return self._get_filter('face_z_val', est_dist, timestamp, **self._z_cfg)
 
     @staticmethod
     def _build_rmat(yaw_deg, pitch_deg):
@@ -284,10 +289,8 @@ class EyeTracker:
 
         # 2. 姿态角计算
         pitch, yaw = self._calculate_face_normal_pose(face_landmarks, w, h)
-        y_cfg = settings.FILTER_CONFIG['FACE']['YAW']
-        p_cfg = settings.FILTER_CONFIG['FACE'].get('PITCH', y_cfg)
-        self.current_yaw = self._get_filter('head_yaw', yaw, ts, **y_cfg)
-        self.current_pitch = self._get_filter('head_pitch', pitch, ts, **p_cfg)
+        self.current_yaw = self._get_filter('head_yaw', yaw, ts, **self._yaw_cfg)
+        self.current_pitch = self._get_filter('head_pitch', pitch, ts, **self._pitch_cfg)
 
         # 3. 深度估算
         self.current_estimated_dist = self._calculate_depth(face_landmarks, w, h, ts, focal_length, self.current_yaw, self.current_pitch)
@@ -311,9 +314,11 @@ class EyeTracker:
         screen_pt = None
         l_conf = r_conf = 0.0
         rmat = None
+        rvec = None
 
         if should_calc_gaze and len(eye_pts) == 2 and self.current_estimated_dist > 0:
             rmat = self._build_rmat(self.current_yaw, self.current_pitch)
+            rvec, _ = cv2.Rodrigues(rmat)
 
             # 提取并滤波左右眼角 landmark → 眼球中心 2D
             outer_l = self._extract_landmark_point(face_landmarks, 33, w, h)
@@ -321,21 +326,21 @@ class EyeTracker:
             outer_r = self._extract_landmark_point(face_landmarks, 263, w, h)
             inner_r = self._extract_landmark_point(face_landmarks, 362, w, h)
 
-            iris_cfg = settings.FILTER_CONFIG['FACE']['IRIS']
+            ic = self._iris_cfg
             if outer_l and inner_l:
-                f_ol = (self._get_filter('gaze_ol_x', outer_l[0], ts, **iris_cfg),
-                        self._get_filter('gaze_ol_y', outer_l[1], ts, **iris_cfg))
-                f_il = (self._get_filter('gaze_il_x', inner_l[0], ts, **iris_cfg),
-                        self._get_filter('gaze_il_y', inner_l[1], ts, **iris_cfg))
+                f_ol = (self._get_filter('gaze_ol_x', outer_l[0], ts, **ic),
+                        self._get_filter('gaze_ol_y', outer_l[1], ts, **ic))
+                f_il = (self._get_filter('gaze_il_x', inner_l[0], ts, **ic),
+                        self._get_filter('gaze_il_y', inner_l[1], ts, **ic))
                 l_eye_center_2d = ((f_ol[0] + f_il[0]) / 2.0, (f_ol[1] + f_il[1]) / 2.0)
             else:
                 l_eye_center_2d = eye_pts[0]
 
             if outer_r and inner_r:
-                f_or = (self._get_filter('gaze_or_x', outer_r[0], ts, **iris_cfg),
-                        self._get_filter('gaze_or_y', outer_r[1], ts, **iris_cfg))
-                f_ir = (self._get_filter('gaze_ir_x', inner_r[0], ts, **iris_cfg),
-                        self._get_filter('gaze_ir_y', inner_r[1], ts, **iris_cfg))
+                f_or = (self._get_filter('gaze_or_x', outer_r[0], ts, **ic),
+                        self._get_filter('gaze_or_y', outer_r[1], ts, **ic))
+                f_ir = (self._get_filter('gaze_ir_x', inner_r[0], ts, **ic),
+                        self._get_filter('gaze_ir_y', inner_r[1], ts, **ic))
                 r_eye_center_2d = ((f_or[0] + f_ir[0]) / 2.0, (f_or[1] + f_ir[1]) / 2.0)
             else:
                 r_eye_center_2d = eye_pts[1]
@@ -378,6 +383,7 @@ class EyeTracker:
             left_confidence=l_conf,
             right_confidence=r_conf,
             rmat=rmat,
+            rvec=rvec,
         )
 
     def _calculate_face_normal_pose(self, face_landmarks, w, h):
