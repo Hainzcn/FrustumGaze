@@ -52,7 +52,8 @@ class Visualizer:
                p99_latency=0.0,
                hands_pos=None,
                closest_hand=None,
-               using_full_scan=False):
+               using_full_scan=False,
+               resource_stats=None):
         """
         渲染可视化内容。
         统一入口，负责调用各子模块绘制 ROI、手部、姿态、虹膜、视线及统计信息。
@@ -90,7 +91,10 @@ class Visualizer:
         if gaze_result:
              self._draw_overlay(frame, gaze_result, fps, drop_rate, p99_latency)
 
-        # 6. 显示最终画面
+        # 6. 绘制资源占用信息 (右下角)
+        self._draw_resource_stats(frame, resource_stats)
+
+        # 7. 显示最终画面
         cv2.imshow('FrustumGaze', frame)
         return self.check_exit_key()
 
@@ -401,6 +405,36 @@ class Visualizer:
             if 0 <= dx < w and 0 <= dy < h:
                 cv2.circle(frame, (dx, dy), 4, (0, 255, 255), -1)
                 cv2.putText(frame, "C", (dx + 10, dy), self.FONT, self.FONT_SCALE_TEXT, (0, 255, 255), 1)
+
+    def _draw_resource_stats(self, frame, resource_stats):
+        """在画面右下角绘制 CPU / 内存 / GPU 资源占用信息。"""
+        if frame is None or resource_stats is None:
+            return
+
+        h, w = frame.shape[:2]
+        margin = 10
+        line_height = 20
+        color = (180, 180, 180)
+        font_scale = 0.45
+        thickness = 1
+
+        lines = []
+        cpu = resource_stats.get('cpu_percent', 0.0)
+        mem = resource_stats.get('mem_mb', 0.0)
+        lines.append(f"CPU: {cpu:.0f}% | MEM: {mem:.0f} MB")
+
+        gpu_util = resource_stats.get('gpu_util')
+        gpu_mem = resource_stats.get('gpu_mem_mb')
+        if gpu_util is not None:
+            gpu_mem_display = f"{gpu_mem / 1024:.1f} GB" if gpu_mem and gpu_mem >= 1024 else f"{gpu_mem:.0f} MB"
+            lines.append(f"GPU: {gpu_util:.0f}% | VRAM: {gpu_mem_display}")
+
+        y = h - margin - (len(lines) - 1) * line_height
+        for line in lines:
+            (tw, _), _ = cv2.getTextSize(line, self.FONT, font_scale, thickness)
+            x = w - margin - tw
+            cv2.putText(frame, line, (x, y), self.FONT, font_scale, color, thickness)
+            y += line_height
 
     def check_exit_key(self):
         """

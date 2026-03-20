@@ -48,21 +48,30 @@
 
 2.  **长度通道 ($Z_{length}$)**
     *   **特征点**：眉心 (168) - 鼻尖 (1)。
-    *   **物理基准**：$L_{ref} = 8.0 \text{cm}$ (固定先验值)。
+    *   **物理基准**：$L_{ref} = 6.0 \text{cm}$（`FACE_REF_LENGTH_CM`，固定先验值）。
     *   **特性**：对 Yaw 旋转不敏感，但易受 Pitch 旋转影响。
     *   **计算**：
         $$Z_{length} = \frac{f \cdot L_{ref} \cdot |\cos(\text{Pitch})|}{d_{length\_pixel}}$$
 
 #### 2.1.3 动态校准 (Dynamic Calibration)
 由于个体脸型差异（眼距不同），我们以垂直方向的**长度通道**（假设眉心到鼻尖距离相对固定或作为尺度标准）为基准，动态校准**宽度通道**的物理宽度 $W_{ref}$。
-*   **校准条件**：头部姿态端正（Yaw & Pitch < 15°）。
-*   **更新逻辑**：使用 EMA (指数移动平均) 更新 $W_{ref}$，使其计算出的深度与长度通道一致。
+
+*   **校准条件**：头部姿态端正（$|\text{Yaw}|$ < `min_valid_yaw` 且 $|\text{Pitch}|$ < `min_valid_pitch`，默认均为 15°）。
+*   **异常拒绝**：当单帧估计宽度偏离当前校准值超过 `max_deviation_ratio`（默认 20%）时，跳过本帧更新，防止噪声突变污染校准值。
+*   **更新逻辑**：使用 EMA 更新 $W_{ref}$（$\alpha$ = `width_correction_alpha`，默认 0.05）：
+    $$W_{ref} \leftarrow (1 - \alpha) \cdot W_{ref} + \alpha \cdot \hat{W}$$
+    其中 $\hat{W} = \frac{Z_{length} \cdot d_{width\_pixel}}{f \cdot |\cos(\text{Yaw})|}$ 是从长度通道反推的宽度估计。
+*   **漂移约束**：校准值被钳位到参考值的 $\pm$`clamp_ratio`（默认 30%）范围内：
+    $$W_{ref} \in [W_{init} \cdot (1 - 0.3),\; W_{init} \cdot (1 + 0.3)]$$
 
 #### 2.1.4 深度融合 (Depth Fusion)
 最终深度 $Z_{est}$ 是两通道的加权平均，权重取决于头部旋转角度（角度越小，投影越可靠）：
 $$Z_{est} = \frac{w_{width} \cdot Z_{width} + w_{length} \cdot Z_{length}}{w_{width} + w_{length}}$$
-其中 $w_{width} = |\cos(\text{Yaw})|, w_{length} = |\cos(\text{Pitch})|$。
-当面部正对镜头时 ($\text{Yaw} \approx 0, \text{Pitch} \approx 0$)，两通道权重相等，各占 50%。
+
+权重使用余弦的 $n$ 次幂（`weight_power`，默认 $n=2$）：
+$$w_{width} = |\cos(\text{Yaw})|^n, \quad w_{length} = |\cos(\text{Pitch})|^n$$
+
+幂次 $n > 1$ 使权重在角度增大时衰减更快，从而更积极地抑制大角度通道的贡献。当面部正对镜头时 ($\text{Yaw} \approx 0, \text{Pitch} \approx 0$)，两通道权重近似相等。
 
 #### 2.1.5 Z轴滤波 (Z-Filtering)
 在将深度 $Z$ 用于反投影计算 $(X, Y)$ 坐标前，先对 $Z$ 进行 `OneEuroFilter` 滤波，防止深度的噪声导致平面坐标 $(X, Y)$ 的抖动。
@@ -70,18 +79,34 @@ $$Z_{est} = \frac{w_{width} \cdot Z_{width} + w_{length} \cdot Z_{length}}{w_{wi
 
 ### 2.2 头部姿态解算 (Head Pose Estimation)
 
-头部姿态（Pitch, Yaw, Roll）的获取基于计算机视觉中的经典 **PnP (Perspective-n-Point)** 问题。
+头部姿态（Yaw, Pitch）通过**面部法向量法 (Face Normal Method)** 从关键点几何关系直接推导，不依赖 PnP 求解。
 
 #### 2.2.1 算法路径
-1.  **3D-2D 对应关系构建**：选取人脸 6 个刚性特征点（鼻尖、下巴、眼角、嘴角），建立其在通用 3D 人脸模型系下的坐标 $P_{model}$ 与当前图像观测坐标 $P_{image}$ 的映射。
-2.  **非线性优化求解**：使用 `cv2.solvePnP` 求解相机外参（旋转向量 $\vec{r}$ 和平移向量 $\vec{t}$），使得重投影误差最小化：
 
-$$\min_{\mathbf{R}, \mathbf{t}} \sum_{i} \| P_{image}^{(i)} - \pi(\mathbf{R} P_{model}^{(i)} + \mathbf{t}) \|^2$$
+1.  **特征点选取**：选取 4 个具有良好几何分布的面部特征点：
+    *   左外眼角 (33)、右外眼角 (263) — 定义水平方向
+    *   下巴 (152) — 定义垂直方向
+    *   眉心 (168) — 与下巴构成纵向轴
 
-   其中 $\pi$ 为投影函数。
+2.  **面部平面向量构建**：
+    *   水平向量：$\vec{v}_{h} = P_{263} - P_{33}$（从左眼角指向右眼角）
+    *   垂直向量：$\vec{v}_{v} = P_{152} - P_{168}$（从眉心指向下巴）
 
-3.  **欧拉角转换**：利用罗德里格斯公式将旋转向量转换为旋转矩阵，再分解为欧拉角。
-4.  **滤波**对计算出的角度应用 `OneEuroFilter` 进行平滑处理。
+3.  **法向量计算**：
+    通过叉乘得到面部平面的法向量 $\vec{n}$：
+    $$\vec{n} = \vec{v}_{h} \times \vec{v}_{v}$$
+    并对 $\vec{n}$ 进行归一化。法向量指向面部"正前方"。
+
+4.  **欧拉角提取**：
+    从归一化法向量 $\hat{n} = (n_x, n_y, n_z)$ 直接提取 Yaw 和 Pitch：
+    $$\text{Yaw} = \arctan2(n_x, n_z)$$
+    $$\text{Pitch} = -\arcsin(n_y) + \beta$$
+    其中 $\beta \approx 30°$ 是经验性偏置修正，用于补偿人脸静息时 MediaPipe 特征点分布产生的固有法向量倾斜。
+
+5.  **旋转矩阵构建**：
+    从 Yaw/Pitch 欧拉角直接构造旋转矩阵 $\mathbf{R} = \mathbf{R}_y(\text{Yaw}) \cdot \mathbf{R}_x(\text{Pitch})$，而非从 PnP 获得。`rvec` 则通过 `cv2.Rodrigues(R)` 从该矩阵转换得到，仅用于可视化绘制。
+
+6.  **滤波**：对 Yaw 和 Pitch 分别应用 `OneEuroFilter` 进行平滑处理。
 
 ### 2.3 平面位置反投影 (Back-Projection)
 
@@ -95,22 +120,64 @@ $$X = Z_{corrected} \times \frac{u - c_x}{f_x}, \quad Y = Z_{corrected} \times \
 
 ## 3. 视线追踪算法 (Gaze Estimation)
 
-本项目**基于几何模型完成视线估计**，通过重建眼球球形结构来计算视线向量。
+本项目**基于纯 2D-3D 反投影的几何模型完成视线估计**，不依赖 PnP 的旋转/平移矩阵，而是通过相机内参将 2D 特征点反投影至 3D 空间，再利用射线-球面交点重建视线向量。
 
-### 3.1 算法流程
-1.  **眼球中心定位**：
-    利用 PnP 解算出的头部旋转 $\mathbf{R}$ 和平移 $\mathbf{T}$，将标准人脸模型中的眼球中心变换至当前相机坐标系：
-    
-$$P_{eye\_cam} = \mathbf{R} \cdot P_{eye\_model} + \mathbf{T}$$
+### 3.1 单眼视线计算流程
 
-3.  **虹膜射线投射 (Ray Casting)**：
-    从相机光心出发，穿过图像平面上的虹膜中心点 $P_{iris\_uv}$ 发射一条射线。
-4.  **几何求交 (Geometric Intersection)**：
-    将眼球建模为半径 $r \approx 12mm$ 的球体。计算射线与球面的交点 $P_{iris\_3d}$。
-5.  **视线向量生成**：
-    连接眼球中心与虹膜表面交点，得到视线方向向量：
+对每只眼睛独立执行以下步骤（`_compute_single_eye_gaze`）：
 
-$$\vec{V}_{gaze} = \frac{P_{iris\_3d} - P_{eye\_cam}}{\| P_{iris\_3d} - P_{eye\_cam} \|}$$
+1.  **眼球中心 2D 定位**：
+    取内外眼角 landmark 的中点作为眼球中心的 2D 投影，并对该中点应用 `OneEuroFilter` 平滑：
+    $$P_{eye\_2d} = \frac{P_{inner} + P_{outer}}{2}$$
+
+2.  **2D → 3D 反投影**：
+    利用相机内参逆矩阵 $\mathbf{K}^{-1}$ 将 2D 齐次坐标转换为 3D 射线方向：
+    $$\vec{d}_{eye} = \mathbf{K}^{-1} \cdot \begin{pmatrix} u_{eye} \\ v_{eye} \\ 1 \end{pmatrix}$$
+    沿射线投影到头部估计深度 $Z_{head}$ 处，得到眼球表面点 $P_{surface}$：
+    $$P_{surface} = \vec{d}_{eye} \cdot \frac{Z_{head}}{(\vec{d}_{eye})_z}$$
+
+3.  **球心计算**：
+    沿射线方向向内偏移一个眼球半径 $r$（`EYE_BALL_RADIUS_CM`，默认 1.2cm），得到球心 $C$：
+    $$C = P_{surface} + r \cdot \hat{d}_{eye}$$
+
+4.  **虹膜射线投射**：
+    虹膜中心 2D 坐标（经 `OneEuroFilter` 平滑后）同样通过 $\mathbf{K}^{-1}$ 反投影为射线 $\vec{d}_{iris}$。
+
+5.  **射线-球面求交**：
+    解方程 $\| O + t \cdot \vec{d}_{iris} - C \|^2 = r^2$（其中 $O$ 为相机光心位置），取较近的交点 $P_{iris\_3d}$。若无交点，回退为射线上距球心最近点。
+
+6.  **视线向量生成**：
+    $$\vec{V}_{gaze} = \frac{P_{iris\_3d} - C}{\| P_{iris\_3d} - C \|}$$
+
+### 3.2 双眼置信度融合
+
+系统对双眼分别计算置信度（`_compute_eye_confidence`），并加权融合得到最终视线。
+
+**置信度由两个因子相乘得到：**
+
+1.  **Yaw 几何可见性权重**：当头部向一侧偏转时，该侧眼睛的虹膜投影被压缩、不再可靠：
+    $$w_{yaw} = \text{clamp}\left(\frac{|\text{Yaw}_{max}| - |\text{Yaw}|}{|\text{Yaw}_{max}| - |\text{Yaw}_{min}|},\; 0,\; 1\right)$$
+    左眼在 Yaw > 0（向右偏转）时权重下降，右眼反之。
+
+2.  **眼睑开合度**：取上下眼睑 landmark 的垂直距离与眼睛水平宽度的比值；眼睛越闭合，置信度越低。
+
+**最终融合：**
+$$\vec{V}_{final} = \frac{w_L \cdot \vec{V}_L + w_R \cdot \vec{V}_R}{w_L + w_R}$$
+
+若某只眼置信度为 0 则完全使用另一只；若两者均为 0 则回退为头部朝向。
+
+### 3.3 屏幕平面交点
+
+获得融合后的 3D 视线向量后，计算其与虚拟屏幕平面的交点（`calculate_screen_intersection`）：
+
+*   以屏幕中心为原点、屏幕法线 $\hat{n}_{screen}$ 定义平面。
+*   求射线 $(P_{eye}, \vec{V}_{gaze})$ 与该平面的交点参数 $t$：
+    $$t = \frac{(\vec{P}_{screen} - \vec{P}_{eye}) \cdot \hat{n}_{screen}}{\vec{V}_{gaze} \cdot \hat{n}_{screen}}$$
+*   交点坐标归一化到 $[0, 1]$ 范围映射为屏幕 UV。
+
+### 3.4 备注
+
+旋转矩阵 $\mathbf{R}$ 和旋转向量 $\vec{r}$（由 2.2 节面部法向量法构建）**不参与视线计算**，仅用于 OpenCV 可视化绘制面部坐标轴。
 
 ---
 
@@ -123,15 +190,18 @@ $$\vec{V}_{gaze} = \frac{P_{iris\_3d} - P_{eye\_cam}}{\| P_{iris\_3d} - P_{eye\_
 手部追踪的主要流程如下：
 
 1.  **MediaPipe Landmarks 检测**：获取手部 21 个关键点的归一化坐标。
-2.  **几何特征计算**：构建统一坐标系，计算手部的 Yaw/Pitch 旋转角及聚拢系数（Grip Factor）。
-3.  **多通道深度估算**：
+2.  **关键点滤波**：对每个 landmark 的 $(x, y)$ 坐标应用 `OneEuroFilter`，减少抖动。
+3.  **几何特征计算**：构建统一坐标系，计算手部的 Yaw/Pitch 旋转角及聚拢系数（Grip Factor）。
+4.  **多通道深度估算**：
     *   **长度通道 (Up)**：基于手腕到中指根部的长度。
     *   **宽度通道 (Across)**：基于食指根部到小指根部的宽度（作为基准）。
-4.  **深度融合**：根据手部姿态和聚拢程度，动态加权融合各通道深度。
-5.  **时序平滑与锚定**：
+5.  **深度融合**：根据手部姿态和聚拢程度，动态加权融合各通道深度。
+6.  **Z 轴滤波**：融合后的深度先经 `OneEuroFilter` 平滑，再用于反投影 XY 坐标。
+7.  **时序平滑与锚定**：
     *   **Motion Score**：基于深度变化率检测手部运动状态。
     *   **Depth Anchor**：在低置信度状态下（如握拳）引入历史高置信度值。
     *   **Kalman Filtering**：动态调整观测噪声协方差（R），实现自适应平滑。
+8.  **捏合检测**：基于拇指与食指 3D 距离判定捏合状态，并进行去抖处理。
 
 ### 4.2 详细算法逻辑
 
@@ -223,17 +293,47 @@ $$
 *   **展开或运动时**：$R_z$ 较小，滤波器信任当前观测值，响应快。
 *   **握拳且静止时**：$R_z$ 增大，滤波器信任预测模型，抑制因握拳产生的抖动和漂移。
 
+#### 4.2.6 捏合检测 (Pinch Detection)
+
+通过拇指尖与食指尖的 3D 距离判定捏合手势（`_detect_pinch_raw`）。
+
+1.  **距离计算**：
+    将拇指尖 (4) 和食指尖 (8) 的归一化坐标反投影为相机空间 3D 坐标（利用当前帧深度 $Z$），并计算欧氏距离 $d_{pinch}$。
+
+2.  **阈值判定**：
+    $$\text{pinch\_raw} = \begin{cases} 1 & d_{pinch} < \text{PINCH\_THRESHOLD\_CM} \\ 0 & \text{otherwise} \end{cases}$$
+    其中 `PINCH_THRESHOLD_CM` 默认为 4.0cm。
+
+3.  **去抖 (Debounce)**：
+    原始判定需连续维持 `PINCH_DEBOUNCE_FRAMES`（默认 2 帧）后才切换状态，避免临界距离附近的抖动。
+
+#### 4.2.7 滤波策略补充
+
+手部追踪中使用了多层滤波，执行顺序如下：
+
+1.  **关键点 OneEuro**：对 21 个 landmark 的 $(x, y)$ 像素坐标滤波（配置：`FILTER_CONFIG['HAND']['KEYPOINT']`）。
+2.  **像素距离 OneEuro**：对两通道的像素距离 $d_{pixel}$ 滤波（配置：`FILTER_CONFIG['HAND']['PIXEL_DIST']`），防止距离突变。
+3.  **Z 轴 OneEuro**：对融合后的深度 $Z_{est}$ 滤波（配置：`FILTER_CONFIG['HAND']['DEPTH']`），**在反投影 XY 之前执行**，确保平面坐标稳定性。
+4.  **3D 坐标 Kalman**：最终对 $(X, Y, Z)$ 三维坐标进行自适应卡尔曼滤波。
+
+焦距回退逻辑：当相机内参不可用时，使用预计算的 $\tan(\text{fov}/2)$ 从图像宽度估算焦距：$f = \frac{W_{img}/2}{\tan(\text{fov}/2)}$，其中 `tan_half_fov` 在 `__init__` 中预计算。
+
 ### 4.3 参数配置
 
 关键参数可在 `config/settings.py` 中调整：
 
 | 参数名 | 说明 | 典型值 |
 | :--- | :--- | :--- |
-| `HAND_REF_WIDTH_M` | 手掌横向参考宽度 (m) | 0.06 |
-| `HAND_REF_LENGTH_M` | 手掌纵向参考长度 (m) | 0.09 |
-| `HAND_KALMAN_R_GRIP_MAX` | 握拳时最大附加观测噪声 | 1.0 |
-| `HAND_DEPTH_ANCHOR_HALFLIFE` | 锚定值半衰期 (帧) | 45 |
-| `HAND_GRIP_SMOOTHING_ALPHA` | 聚拢系数平滑因子 | 0.3 |
+| `HAND_REF_WIDTH_CM` | 手掌横向参考宽度 (cm) | 6.0 |
+| `HAND_REF_LENGTH_CM` | 手掌纵向参考长度 (cm) | 9.0 |
+| `PINCH_THRESHOLD_CM` | 捏合判定距离阈值 (cm) | 4.0 |
+| `PINCH_DEBOUNCE_FRAMES` | 捏合状态切换去抖帧数 | 2 |
+| `FILTER_CONFIG['HAND']['KALMAN']['r_grip_max']` | 握拳时最大附加观测噪声 | 1.0 |
+| `FILTER_CONFIG['HAND']['KALMAN']['depth_anchor_halflife']` | 锚定值半衰期 (帧) | 45 |
+| `FILTER_CONFIG['HAND']['KALMAN']['grip_smoothing_alpha']` | 聚拢系数平滑因子 | 0.3 |
+| `FILTER_CONFIG['HAND']['KEYPOINT']` | 关键点 OneEuro 滤波参数 | — |
+| `FILTER_CONFIG['HAND']['PIXEL_DIST']` | 像素距离 OneEuro 滤波参数 | — |
+| `FILTER_CONFIG['HAND']['DEPTH']` | 深度 Z 轴 OneEuro 滤波参数 | — |
 
 ---
 

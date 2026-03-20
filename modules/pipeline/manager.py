@@ -468,8 +468,9 @@ class FrustumGazePipeline:
             pass
 
     def _update_stats(self):
-        """每秒更新一次丢包率统计。"""
+        """每秒更新一次丢包率与资源占用统计。"""
         self.stats_manager.update_drop_rate()
+        self.stats_manager.update_resource_usage()
 
     def _render(self):
         """
@@ -493,7 +494,8 @@ class FrustumGazePipeline:
                 p99_latency=stats.get('p99_latency', 0.0),
                 hands_pos=self.latest_hands_pos,
                 closest_hand=self.latest_closest_hand,
-                using_full_scan=self.latest_using_full_scan
+                using_full_scan=self.latest_using_full_scan,
+                resource_stats=stats
             )
             return should_stop
         else:
